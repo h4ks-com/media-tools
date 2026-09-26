@@ -6,6 +6,7 @@ baked into the image at build time. One request runs on the GPU at a time.
 
 import json
 import os
+import shutil
 import struct
 import subprocess
 import tempfile
@@ -42,7 +43,8 @@ def run_stage(command: list[str], cwd: Path | None = None) -> None:
     except subprocess.TimeoutExpired as error:
         raise RigError(f"{command[0]} timed out") from error
     if result.returncode != 0:
-        raise RigError(result.stderr.decode(errors="replace")[-2000:] or f"{command[0]} failed")
+        output = (result.stderr or result.stdout).decode(errors="replace").strip()
+        raise RigError(output[-2000:] or f"{command[0]} failed")
 
 
 def check_embedded(data: bytes) -> None:
@@ -68,7 +70,17 @@ def check_embedded(data: bytes) -> None:
                 raise RigError(f"the GLB {key} must be embedded, not linked")
 
 
+def clear_scratch() -> None:
+    scratch = UNIRIG_DIR / "tmp"
+    for entry in scratch.iterdir():
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+
+
 def rig(data: bytes) -> bytes:
+    clear_scratch()
     with tempfile.TemporaryDirectory() as workdir_name:
         workdir = Path(workdir_name)
         source = workdir / "input.glb"
@@ -89,8 +101,6 @@ def rig(data: bytes) -> bytes:
                 str(skeleton),
                 "--skeleton_task",
                 SKELETON_TASK,
-                "--npz_dir",
-                str(workdir / "npz_skeleton"),
             ],
             cwd=UNIRIG_DIR,
         )
@@ -102,8 +112,6 @@ def rig(data: bytes) -> bytes:
                 str(skeleton),
                 "--output",
                 str(skin),
-                "--npz_dir",
-                str(workdir / "npz_skin"),
             ],
             cwd=UNIRIG_DIR,
         )
