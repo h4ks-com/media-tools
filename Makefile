@@ -1,4 +1,4 @@
-.PHONY: install fix precommit format format-check lint lint-fix imports imports-check typecheck dead-code unused-deps security audit test coverage build quality ci docker-build run
+.PHONY: install fix precommit format format-check lint lint-fix imports imports-check typecheck dead-code unused-deps security audit audit-rig test test-rig coverage build quality ci docker-build run
 
 install:
 	uv sync
@@ -30,19 +30,26 @@ typecheck:
 	uv run mypy
 
 dead-code:
-	uv run vulture src/media_tools tests
+	uv run vulture src/media_tools tests rig
 
 unused-deps:
 	uv run deptry .
 
 security:
-	uv run bandit -c pyproject.toml -r src/media_tools
+	uv run bandit -c pyproject.toml -r src/media_tools rig
 
 audit:
 	uv run --with pip pip-audit
 
+audit-rig:
+	uv run pip-audit --disable-pip --require-hashes -r rig/requirements.txt \
+		$(addprefix --ignore-vuln ,$(shell grep -v '^#' rig/accepted-vulns.txt))
+
 test:
 	uv run pytest
+
+test-rig:
+	PYTHONPATH=rig uv run pytest rig/tests
 
 coverage:
 	uv run pytest --cov --cov-report=term-missing
@@ -50,7 +57,7 @@ coverage:
 build:
 	uv build
 
-quality: format-check lint typecheck imports-check dead-code unused-deps security audit coverage build
+quality: format-check lint typecheck imports-check dead-code unused-deps security audit audit-rig coverage test-rig build
 	@echo "quality gate passed"
 
 ci: quality

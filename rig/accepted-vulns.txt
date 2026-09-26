@@ -1,0 +1,20 @@
+# UniRig pins transformers 4.51.3. We load only the mounted opt-350m weights offline, and these
+# CVEs sit in tokenizers, Trainer, model conversion and remote checkpoint loading, which no request reaches.
+CVE-2025-14920
+CVE-2025-14921
+CVE-2025-14924
+CVE-2025-14926
+CVE-2025-14927
+CVE-2025-14928
+CVE-2025-14929
+CVE-2025-14930
+CVE-2025-3777
+CVE-2025-3933
+CVE-2025-5197
+CVE-2025-6051
+CVE-2025-6638
+CVE-2025-6921
+CVE-2026-1839
+CVE-2026-4372
+CVE-2026-5241
+CVE-2026-9856

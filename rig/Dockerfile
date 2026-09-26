@@ -26,33 +26,25 @@ WORKDIR /opt/unirig/repo
 COPY patches/vertex_group.patch /tmp/vertex_group.patch
 RUN git apply /tmp/vertex_group.patch && rm /tmp/vertex_group.patch
 
-# --cls vroid is a no-op upstream: ar_inference_articulationxl.yaml hardcodes
-# assign_cls: articulationxl. These two configs force the vroid class instead, so
-# generate_skeleton.sh outputs exactly the 22 VRoid body bones.
+# Upstream ar_inference_articulationxl.yaml hardcodes assign_cls: articulationxl and
+# ignores --cls vroid, so we copy in two configs that set the vroid class and make
+# generate_skeleton.sh output exactly the 22 VRoid body bones.
 COPY configs/ar_inference_vroid_forced.yaml configs/system/ar_inference_vroid_forced.yaml
 COPY configs/quick_inference_skeleton_vroid_forced.yaml configs/task/quick_inference_skeleton_vroid_forced.yaml
 
-# requirements.txt pulls in flash_attn too, which tries to build from source; install
-# its other packages directly instead and drop in the prebuilt flash_attn wheel below.
-RUN pip install transformers==4.51.3 python-box einops omegaconf pytorch_lightning \
-        lightning addict timm fast-simplification trimesh open3d pyrender \
-        huggingface_hub wandb \
-    && pip install numpy==1.26.4 \
-    && pip install spconv-cu124 \
-    && pip install torch_scatter torch_cluster -f https://data.pyg.org/whl/torch-2.5.1+cu124.html \
-    && pip install bpy==4.2.0 \
-    && pip install PyOpenGL==3.1.7 \
-    && pip install fastapi==0.141.1 "uvicorn[standard]==0.53.0"
+# We install UniRig's packages from a hash-locked file without resolving, because the base
+# image already holds torch and its CUDA wheels and pyrender pins an older PyOpenGL.
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install --no-deps --require-hashes -r /tmp/requirements.txt && rm /tmp/requirements.txt
 
-# pip requires a wheel's own filename, not just its contents, to match its naming
-# convention, so this keeps the upstream filename instead of renaming it.
+# pip reads a wheel's platform tags from its filename, so we keep the upstream name.
 ADD --checksum=sha256:1c455db7a1e5d58e9d43370ecfc75a3a2eb1e37ec12353db66d12c23dbbc3ac6 \
     https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post1/flash_attn-2.8.3.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl /tmp/
 RUN pip install /tmp/flash_attn-2.8.3.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl \
     && rm /tmp/flash_attn-2.8.3.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
 
-# Same pinned gltfpack as the main image, used here to strip EXT_meshopt_compression
-# before handing a mesh to bpy, which can't read it.
+# We bake the same pinned gltfpack as the main image and use it to strip
+# EXT_meshopt_compression, since bpy reads only uncompressed meshes.
 ADD --checksum=sha256:ebc236f5f6c08c7e5c5750476a187d24805d44d8c680449c4b7369c333f817b1 \
     https://github.com/zeux/meshoptimizer/releases/download/v1.2/gltfpack-ubuntu.zip /tmp/gltfpack.zip
 RUN python -m zipfile -e /tmp/gltfpack.zip /opt/tools \

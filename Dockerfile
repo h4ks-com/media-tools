@@ -36,7 +36,9 @@ ENV PATH="/app/.venv/bin:$PATH" \
 COPY --from=builder /app/.venv /app/.venv
 COPY --from=builder /tools /opt/tools
 
-RUN groupadd --system --gid 1000 media && useradd --system --uid 1000 --gid media media
+# We remove the base image's pip, since uv installs our packages and pip vendors a vulnerable msgpack.
+RUN /usr/local/bin/python -m pip uninstall --yes pip \
+    && groupadd --system --gid 1000 media && useradd --system --uid 1000 --gid media media
 
 USER 1000:1000
 

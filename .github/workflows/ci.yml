@@ -46,12 +46,17 @@ jobs:
             type=ref,event=branch
             type=raw,value=latest
             type=sha
+      # We build once and push the loaded image, so the registry gets the bytes we tested.
       - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
         with:
           context: .
           load: true
-          tags: media-tools:smoke
+          tags: |
+            media-tools:smoke
+            ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
+          cache-to: type=gha,mode=max
       # We run the image as the pod does, so file modes and the missing network break the build.
       - name: Smoke test the image
         run: |
@@ -94,15 +99,18 @@ jobs:
           EOF
       - if: failure()
         run: docker logs smoke
-      - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+      - name: Scan the image for fixable high and critical vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
-          context: .
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-          provenance: mode=max
+          version: v0.74.0
+          image-ref: media-tools:smoke
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Push the tested image
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: for tag in $TAGS; do docker push "$tag"; done
 
   publish-rig:
     needs: [quality]
@@ -127,12 +135,52 @@ jobs:
             type=ref,event=branch
             type=raw,value=latest
             type=sha
+      # We free space because the loaded CUDA image outgrows the runner's default disk.
+      - name: Free disk space
+        run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
         with:
           context: ./rig
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
+          load: true
+          tags: |
+            unirig:scan
+            ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=rig
           cache-to: type=gha,scope=rig,mode=max
-          provenance: mode=max
+      - name: Scan the rig image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          version: v0.74.0
+          image-ref: unirig:scan
+          format: json
+          output: rig-trivy.json
+      - name: Scan its base image
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
+        with:
+          version: v0.74.0
+          skip-setup-trivy: true
+          image-ref: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          format: json
+          output: base-trivy.json
+      # We fail on fixable criticals in what we install and report the ones the base brings
+      # or rig/accepted-vulns.txt lists.
+      - name: Fail on fixable criticals we install
+        run: |
+          jq -r --slurpfile base base-trivy.json --rawfile accepted rig/accepted-vulns.txt \
+            -f .github/trivy-report.jq rig-trivy.json > trivy-report.md
+          cat trivy-report.md >> "$GITHUB_STEP_SUMMARY"
+          cat trivy-report.md
+          ! grep -q '| ours | CRITICAL | yes |' trivy-report.md
+      - if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: rig-trivy
+          path: |
+            rig-trivy.json
+            base-trivy.json
+            trivy-report.md
+      - name: Push the scanned image
+        env:
+          TAGS: ${{ steps.meta.outputs.tags }}
+        run: for tag in $TAGS; do docker push "$tag"; done
