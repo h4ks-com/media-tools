@@ -1,16 +1,19 @@
 """HTTP service that rigs a humanoid GLB with the UniRig vroid skeleton.
 
-Reachable only from n8n, with no egress of its own: every tool and model weight is
-baked into the image at build time. One request runs on the GPU at a time.
+Reachable only from n8n, with no egress of its own: every tool is baked into the image
+and the pod mounts the model weights read-only. One request runs on the GPU at a time.
 """
 
 import json
 import os
 import shutil
+import signal
 import struct
-import subprocess
+import subprocess  # nosec B404: we run only gltfpack and UniRig's scripts, with arguments we build
 import tempfile
 import threading
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -25,8 +28,12 @@ GLTFPACK = os.environ.get("GLTFPACK", "/opt/tools/gltfpack")
 MAX_MODEL_BYTES = 300 * 1024 * 1024
 STAGE_TIMEOUT_SECONDS = float(os.environ.get("STAGE_TIMEOUT_SECONDS", "600"))
 SKELETON_TASK = "configs/task/quick_inference_skeleton_vroid_forced.yaml"
+MAX_IN_FLIGHT = 2
+JSON_CHUNK = 0x4E4F534A
+JSON_START = 20
 
 gpu_slot = threading.Lock()
+in_flight = 0
 
 app = FastAPI(title="unirig", docs_url=None, redoc_url=None, openapi_url=None)
 
@@ -35,32 +42,61 @@ class RigError(Exception):
     pass
 
 
-def run_stage(command: list[str], produces: Path, cwd: Path | None = None) -> None:
+@contextmanager
+def gpu_turn() -> Iterator[None]:
+    """Count a request that waits for or holds the GPU, refusing it when too many do.
+
+    :raises HTTPException: 429 when MAX_IN_FLIGHT requests are already in.
+    """
+    global in_flight
+    if in_flight >= MAX_IN_FLIGHT:
+        raise HTTPException(429, "busy, try again")
+    in_flight += 1
     try:
-        result = subprocess.run(  # nosec B603
-            command, cwd=cwd, capture_output=True, timeout=STAGE_TIMEOUT_SECONDS, check=False
-        )
-    except subprocess.TimeoutExpired as error:
-        raise RigError(f"{command[0]} timed out") from error
-    if result.returncode != 0:
-        output = (result.stderr or result.stdout).decode(errors="replace").strip()
+        yield
+    finally:
+        in_flight -= 1
+
+
+def run_stage(command: list[str], produces: Path, cwd: Path | None = None) -> None:
+    # UniRig's scripts run python as a child of bash, so on timeout we kill the whole session.
+    with subprocess.Popen(  # nosec B603
+        command,
+        cwd=cwd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    ) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=STAGE_TIMEOUT_SECONDS)
+        except subprocess.TimeoutExpired as error:
+            os.killpg(process.pid, signal.SIGKILL)
+            process.communicate()
+            raise RigError(f"{command[0]} timed out") from error
+    if process.returncode != 0:
+        output = (stderr or stdout).decode(errors="replace").strip()
         raise RigError(output[-2000:] or f"{command[0]} failed")
     # UniRig's scripts exit 0 even when python fails, so we check for the file each stage makes.
     if not produces.exists():
-        output = (result.stdout + result.stderr).decode(errors="replace").strip()
+        output = (stdout + stderr).decode(errors="replace").strip()
         raise RigError(output[-2000:] or f"{command[0]} made no {produces.name}")
 
 
+def refuse_constant(name: str) -> float:
+    raise RigError(f"the GLB JSON holds {name}")
+
+
 def check_embedded(data: bytes) -> None:
-    """Refuse a GLB that points at files outside itself, since gltfpack and Blender would read them."""
-    if len(data) < 20:
+    """Refuse a GLB that points at files outside itself, since gltfpack and Blender read them."""
+    if len(data) < JSON_START:
         raise RigError("the GLB is too short")
     chunk_length, chunk_type = struct.unpack_from("<II", data, 12)
-    if chunk_type != 0x4E4F534A or 20 + chunk_length > len(data):
+    if chunk_type != JSON_CHUNK or JSON_START + chunk_length > len(data):
         raise RigError("the GLB has no JSON chunk")
     try:
-        document = json.loads(data[20 : 20 + chunk_length])
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        json_chunk = data[JSON_START : JSON_START + chunk_length]
+        document = json.loads(json_chunk, parse_constant=refuse_constant)
+    except (ValueError, RecursionError) as error:
         raise RigError("the GLB JSON cannot be read") from error
     if not isinstance(document, dict):
         raise RigError("the GLB JSON is not an object")
@@ -69,9 +105,11 @@ def check_embedded(data: bytes) -> None:
         if not isinstance(entries, list):
             raise RigError(f"the GLB {key} are not a list")
         for entry in entries:
-            uri = entry.get("uri") if isinstance(entry, dict) else None
+            if not isinstance(entry, dict):
+                raise RigError(f"the GLB {key} are not a list of objects")
+            uri = entry.get("uri")
             if uri is not None and not (isinstance(uri, str) and uri.startswith("data:")):
-                raise RigError(f"the GLB {key} must be embedded, not linked")
+                raise RigError(f"the GLB {key} must embed their data")
 
 
 def rig(data: bytes) -> bytes:
@@ -83,7 +121,7 @@ def rig(data: bytes) -> bytes:
         skin = workdir / "skin.fbx"
         rigged = workdir / "rigged.glb"
         source.write_bytes(data)
-        # UniRig writes logs and intermediate files inside its own folder, so each job runs in a copy.
+        # UniRig writes logs and scratch files inside its own folder, so we run each job in a copy.
         repo = workdir / "repo"
         shutil.copytree(UNIRIG_DIR, repo, symlinks=True)
 
@@ -141,8 +179,7 @@ async def healthz() -> str:
     return "ok"
 
 
-@app.post("/rig")
-async def rig_route(request: Request) -> Response:
+async def read_glb_body(request: Request) -> bytes:
     declared = request.headers.get("content-length", "")
     if not declared.isdigit() or not 0 < int(declared) <= MAX_MODEL_BYTES:
         raise HTTPException(
@@ -151,20 +188,26 @@ async def rig_route(request: Request) -> Response:
     body = await request.body()
     if len(body) != int(declared) or body[:4] != b"glTF":
         raise HTTPException(400, "send a binary GLB (glTF magic header)")
-
     try:
         check_embedded(body)
     except RigError as error:
         raise HTTPException(400, str(error)) from error
+    return body
 
-    def locked() -> bytes:
-        with gpu_slot:
-            return rig(body)
 
-    try:
-        glb = await run_in_threadpool(locked)
-    except RigError as error:
-        raise HTTPException(422, str(error)) from error
+def rig_on_gpu(data: bytes) -> bytes:
+    with gpu_slot:
+        return rig(data)
+
+
+@app.post("/rig")
+async def rig_route(request: Request) -> Response:
+    with gpu_turn():
+        body = await read_glb_body(request)
+        try:
+            glb = await run_in_threadpool(rig_on_gpu, body)
+        except RigError as error:
+            raise HTTPException(422, str(error)) from error
     return Response(
         glb,
         media_type="model/gltf-binary",

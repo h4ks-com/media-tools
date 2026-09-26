@@ -41,7 +41,6 @@ package = true
 line-length = 100
 target-version = "py314"
 src = ["src", "tests"]
-extend-exclude = ["rig"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "PIE", "RET", "RUF", "C90", "PLR", "D"]
@@ -76,7 +75,8 @@ strict = true
 warn_unused_ignores = true
 warn_redundant_casts = true
 warn_return_any = true
-files = ["src/media_tools", "tests"]
+files = ["src/media_tools", "tests", "rig"]
+mypy_path = "rig"
 
 [[tool.mypy.overrides]]
 module = ["onnxruntime"]
