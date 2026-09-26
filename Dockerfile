@@ -22,7 +22,7 @@ RUN --mount=type=cache,target=/root/.cache/uv \
 # The tools come in at pinned checksums, so the running pod needs no network at all.
 ADD --checksum=sha256:ebc236f5f6c08c7e5c5750476a187d24805d44d8c680449c4b7369c333f817b1 \
     https://github.com/zeux/meshoptimizer/releases/download/v1.2/gltfpack-ubuntu.zip /tools/gltfpack.zip
-ADD --checksum=sha256:60920e99c45464f2ba57bee2ad08c919a52bbf852739e96947fbb4358c0d964a \
+ADD --checksum=sha256:60920e99c45464f2ba57bee2ad08c919a52bbf852739e96947fbb4358c0d964a --chmod=644 \
     https://github.com/danielgatis/rembg/releases/download/v0.0.0/isnet-general-use.onnx /tools/isnet-general-use.onnx
 RUN python -m zipfile -e /tools/gltfpack.zip /tools && chmod 0755 /tools/gltfpack && rm /tools/gltfpack.zip
 

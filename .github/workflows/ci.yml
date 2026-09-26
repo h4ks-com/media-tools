@@ -49,6 +49,54 @@ jobs:
       - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
         with:
           context: .
+          load: true
+          tags: media-tools:smoke
+          cache-from: type=gha
+      # We run the image as the pod does, so file modes and the missing network break the build.
+      - name: Smoke test the image
+        run: |
+          docker run -d --name smoke --user 1000:1000 --read-only --tmpfs /tmp --network none media-tools:smoke
+          docker exec -i smoke python - <<'EOF'
+          import io
+          import struct
+          import time
+          import urllib.request
+
+          from PIL import Image
+
+          from media_tools.glb import write_glb
+
+          BASE = "http://127.0.0.1:8080"
+          for _ in range(60):
+              try:
+                  urllib.request.urlopen(f"{BASE}/healthz", timeout=2)
+                  break
+              except OSError:
+                  time.sleep(1)
+          picture = io.BytesIO()
+          Image.new("RGB", (64, 64), "white").save(picture, format="PNG")
+          triangle = {
+              "asset": {"version": "2.0"},
+              "buffers": [{"byteLength": 36}],
+              "bufferViews": [{"buffer": 0, "byteLength": 36}],
+              "accessors": [
+                  {"bufferView": 0, "componentType": 5126, "count": 3, "type": "VEC3",
+                   "min": [0, 0, 0], "max": [1, 1, 0]}
+              ],
+              "meshes": [{"primitives": [{"attributes": {"POSITION": 0}}]}],
+              "nodes": [{"mesh": 0}],
+              "scenes": [{"nodes": [0]}],
+          }
+          model = write_glb(triangle, struct.pack("<9f", 0, 0, 0, 1, 0, 0, 0, 1, 0))
+          for path, body in (("/cutout?method=isnet", picture.getvalue()), ("/mesh?triangles=1000", model)):
+              with urllib.request.urlopen(urllib.request.Request(BASE + path, data=body), timeout=600) as response:
+                  print(path, response.status)
+          EOF
+      - if: failure()
+        run: docker logs smoke
+      - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
+        with:
+          context: .
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}

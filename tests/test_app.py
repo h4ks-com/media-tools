@@ -163,6 +163,40 @@ def test_retarget_refuses_large_motions(walk: bytes, monkeypatch: pytest.MonkeyP
     assert status == 400
 
 
+@pytest.mark.parametrize(
+    ("path", "body", "filename"),
+    [
+        ("/pose?move=walk", None, "pose.png"),
+        ("/cutout?method=key", [png((32, 32), (8, 8, 24, 24))], "cutout.png"),
+        ("/pixelate?size=16", [png((32, 32), (8, 8, 24, 24))], "pixel-art.png"),
+        ("/sprite-frames?format=png", [png((32, 32), (8, 8, 24, 24))] * 2, "sprite-sheet.png"),
+        ("/sprite-frames?format=gif", [png((32, 32), (8, 8, 24, 24))] * 2, "sprite-sheet.gif"),
+        ("/mesh?triangles=5000", [b"glb"], "model.glb"),
+    ],
+)
+def test_files_come_back_named_with_their_extension(
+    monkeypatch: pytest.MonkeyPatch, path: str, body: list[bytes] | None, filename: str
+) -> None:
+    monkeypatch.setattr(mesh, "simplify", lambda data, triangles, gltfpack, timeout: data)
+    if body is None:
+        response = client.get(path)
+    else:
+        lengths = ",".join(str(len(part)) for part in body)
+        response = client.post(f"{path}&lengths={lengths}", content=b"".join(body))
+
+    assert response.headers["content-disposition"] == f'inline; filename="{filename}"'
+
+
+def test_retargeted_models_come_back_named(walk: bytes) -> None:
+    character = vroid_rig(walk)
+
+    response = client.post(
+        f"/retarget?lengths={len(character)},{len(walk)}&names=Walk", content=character + walk
+    )
+
+    assert response.headers["content-disposition"] == 'inline; filename="model.glb"'
+
+
 def test_requests_beyond_the_in_flight_cap_are_told_to_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

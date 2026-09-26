@@ -34,6 +34,7 @@ MAX_CLIPS = 8
 GLTFPACK = os.environ.get("GLTFPACK", "/opt/tools/gltfpack")
 TIMEOUT_SECONDS = float(os.environ.get("TIMEOUT_SECONDS", "600"))
 MAX_IN_FLIGHT = 4
+MEDIA_TYPES = {"png": "image/png", "gif": "image/gif", "glb": "model/gltf-binary"}
 
 cutter = pictures.Cutter(os.environ.get("CUTOUT_MODEL", "/opt/tools/isnet-general-use.onnx"))
 # We run one heavy job at a time, since a cutout or a big mesh can take gigabytes.
@@ -85,6 +86,16 @@ def split_body(body: bytes, lengths: str, count: range) -> list[bytes]:
     return [body[offset : offset + size] for offset, size in zip(offsets, sizes, strict=True)]
 
 
+def named_file(data: bytes, filename: str) -> Response:
+    """Answer with a file named `filename`, since n8n otherwise names it after the URL path."""
+    extension = filename.rsplit(".", 1)[1]
+    return Response(
+        data,
+        media_type=MEDIA_TYPES[extension],
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
+
+
 @app.exception_handler(HTTPException)
 async def plain_error(_: Request, error: HTTPException) -> PlainTextResponse:
     return PlainTextResponse(str(error.detail), status_code=error.status_code)
@@ -105,7 +116,7 @@ async def pose(
         png = poses.skeleton_png(move, frames, frame)
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
-    return Response(png, media_type="image/png")
+    return named_file(png, "pose.png")
 
 
 @app.post("/cutout")
@@ -116,7 +127,7 @@ async def cutout(request: Request, method: pictures.CutMethod = "isnet") -> Resp
             png = await run_in_threadpool(in_slot, lambda: cutter.cut(picture, method))
         except ValueError as error:
             raise HTTPException(400, str(error)) from error
-    return Response(png, media_type="image/png")
+    return named_file(png, "cutout.png")
 
 
 @app.post("/pixelate")
@@ -134,7 +145,7 @@ async def pixelate(
             )
         except ValueError as error:
             raise HTTPException(400, str(error)) from error
-    return Response(png, media_type="image/png")
+    return named_file(png, "pixel-art.png")
 
 
 @app.post("/sprite-frames")
@@ -156,7 +167,7 @@ async def sprite_frames(
             raise HTTPException(400, str(error)) from error
         except ValueError as error:
             raise HTTPException(422, str(error)) from error
-    return Response(data, media_type=f"image/{format}")
+    return named_file(data, f"sprite-sheet.{format}")
 
 
 @app.post("/mesh")
@@ -173,7 +184,7 @@ async def simplify_mesh(
             raise HTTPException(400, f"not a usable GLB: {error}") from error
         except mesh.MeshError as error:
             raise HTTPException(422, str(error)) from error
-    return Response(glb, media_type="model/gltf-binary")
+    return named_file(glb, "model.glb")
 
 
 @app.post("/retarget")
@@ -195,4 +206,4 @@ async def retarget_motions(
             glb = await run_in_threadpool(in_slot, lambda: retarget(parts[0], motions, in_place))
         except (GlbError, RetargetError) as error:
             raise HTTPException(422, f"cannot retarget: {error}") from error
-    return Response(glb, media_type="model/gltf-binary")
+    return named_file(glb, "model.glb")
