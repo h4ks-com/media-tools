@@ -1,10 +1,10 @@
 FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
 
+# HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE come later: baking the weights below needs
+# network, and the pod itself never gets any.
 ENV DEBIAN_FRONTEND=noninteractive \
     PYOPENGL_PLATFORM=osmesa \
     HF_HOME=/opt/unirig/hf-cache \
-    HF_HUB_OFFLINE=1 \
-    TRANSFORMERS_OFFLINE=1 \
     HOME=/tmp \
     PIP_NO_CACHE_DIR=1
 
@@ -33,9 +33,11 @@ RUN git apply /tmp/vertex_group.patch && rm /tmp/vertex_group.patch
 COPY configs/ar_inference_vroid_forced.yaml configs/system/ar_inference_vroid_forced.yaml
 COPY configs/quick_inference_skeleton_vroid_forced.yaml configs/task/quick_inference_skeleton_vroid_forced.yaml
 
-# requirements.txt tries to build flash_attn from source; install everything else
-# from it, then drop in the prebuilt flash_attn wheel below.
-RUN pip install -r requirements-noflash.txt \
+# requirements.txt pulls in flash_attn too, which tries to build from source; install
+# its other packages directly instead and drop in the prebuilt flash_attn wheel below.
+RUN pip install transformers==4.51.3 python-box einops omegaconf pytorch_lightning \
+        lightning addict timm fast-simplification trimesh open3d pyrender \
+        huggingface_hub wandb \
     && pip install numpy==1.26.4 \
     && pip install spconv-cu124 \
     && pip install torch_scatter torch_cluster -f https://data.pyg.org/whl/torch-2.5.1+cu124.html \
@@ -55,13 +57,25 @@ RUN python -m zipfile -e /tmp/gltfpack.zip /opt/tools \
     && chmod 0755 /opt/tools/gltfpack \
     && rm /tmp/gltfpack.zip
 
-# Bakes the two checkpoints generate_skeleton.sh/generate_skin.sh load, so the pod
-# needs no network at request time.
+# Bakes the two checkpoints generate_skeleton.sh/generate_skin.sh load, plus the
+# tiny facebook/opt-350m config the skeleton model's architecture is built from, so
+# the pod needs no network at request time.
+# download() (src/inference/download.py) and AutoConfig.from_pretrained() both resolve
+# the unpinned "main" ref at request time; the mkdir/printf below point it at the same
+# pinned commit so that offline lookup finds it with no network call.
 RUN python -c "\
 from huggingface_hub import hf_hub_download; \
-REV = '36842e2b5947e9e60f89275b83208c8e74071c63'; \
-hf_hub_download(repo_id='VAST-AI/UniRig', filename='skeleton/articulation-xl_quantization_256/model.ckpt', revision=REV); \
-hf_hub_download(repo_id='VAST-AI/UniRig', filename='skin/articulation-xl/model.ckpt', revision=REV)"
+SKEL_REV = '36842e2b5947e9e60f89275b83208c8e74071c63'; \
+OPT_REV = '08ab08cc4b72ff5593870b5d527cf4230323703c'; \
+hf_hub_download(repo_id='VAST-AI/UniRig', filename='skeleton/articulation-xl_quantization_256/model.ckpt', revision=SKEL_REV); \
+hf_hub_download(repo_id='VAST-AI/UniRig', filename='skin/articulation-xl/model.ckpt', revision=SKEL_REV); \
+hf_hub_download(repo_id='facebook/opt-350m', filename='config.json', revision=OPT_REV)" \
+    && mkdir -p $HF_HOME/hub/models--VAST-AI--UniRig/refs $HF_HOME/hub/models--facebook--opt-350m/refs \
+    && printf '%s' 36842e2b5947e9e60f89275b83208c8e74071c63 > $HF_HOME/hub/models--VAST-AI--UniRig/refs/main \
+    && printf '%s' 08ab08cc4b72ff5593870b5d527cf4230323703c > $HF_HOME/hub/models--facebook--opt-350m/refs/main
+
+ENV HF_HUB_OFFLINE=1 \
+    TRANSFORMERS_OFFLINE=1
 
 COPY app.py /opt/unirig/app.py
 
