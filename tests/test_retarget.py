@@ -186,6 +186,36 @@ def test_in_place_clips_keep_the_feet_on_the_ground_and_the_hips_on_the_spot(
     assert numpy.ptp(hips[:, 1]) > 0.01
 
 
+def arms_down(document: Document, _: bytearray) -> None:
+    """Lower both upper arms 60 degrees in the rest pose, like a character modelled in an A-pose."""
+    for node in document["nodes"]:
+        side = {"J_Bip_L_UpperArm": -1.0, "J_Bip_R_UpperArm": 1.0}.get(node["name"])
+        if side is not None:
+            tilt = numpy.array([0.0, 0.0, numpy.sin(side * numpy.pi / 6), numpy.cos(numpy.pi / 6)])
+            node["rotation"] = quat_mul(tilt, numpy.array(node.get("rotation", STILL))).tolist()
+
+
+def worst_direction(result: Motion, source: Motion, bone: str, child: str) -> float:
+    """Return the largest angle in degrees between the bone-to-child directions of two motions."""
+    ours = result.position[child] - result.position[bone]
+    theirs = source.position[child] - source.position[bone]
+    cosine = (ours * theirs).sum(axis=1) / (
+        numpy.linalg.norm(ours, axis=1) * numpy.linalg.norm(theirs, axis=1)
+    )
+    return float(numpy.degrees(numpy.arccos(numpy.clip(cosine, -1, 1))).max())
+
+
+def test_an_a_pose_character_moves_its_arms_like_the_t_pose_motion(walk: bytes) -> None:
+    character = edit(vroid_rig(walk), arms_down)
+
+    result = read_motion(clip(retarget(character, [("Walk", walk)]), 0))
+
+    source = read_motion(walk)
+    for side in ("l", "r"):
+        for bone, child in (("upperarm", "lowerarm"), ("lowerarm", "hand")):
+            assert worst_direction(result, source, f"{bone}_{side}", f"{child}_{side}") < 2.0
+
+
 def test_hips_keep_the_motion_height_when_the_first_frame_crouches(walk: bytes) -> None:
     def crouch_first_frame(document: Document, binary: bytearray) -> None:
         accessor = output_accessor(document, HIPS, "translation")

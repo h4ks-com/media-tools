@@ -35,6 +35,15 @@ UNIT_SCALE = numpy.ones(3)
 REQUIRED_BONES = {"hips", "upperleg_l", "upperleg_r", "upperarm_l", "upperarm_r"}
 MOTION_BONES = {"hips", "upperleg_l", "upperleg_r"}
 FEET = ("foot_l", "foot_r", "toe_l", "toe_r")
+LIMB_CHILDREN = {
+    "shoulder": "upperarm",
+    "upperarm": "lowerarm",
+    "lowerarm": "hand",
+    "upperleg": "lowerleg",
+    "lowerleg": "foot",
+    "foot": "toe",
+}
+LIMB_ENDS = {"hand": "lowerarm", "toe": "foot"}
 MAX_NODES = 2000
 MAX_JOINTS = 1000
 MAX_FRAMES = 10_000
@@ -589,11 +598,47 @@ def parent_rotation(tree: Skeleton, joint: int, world: dict[int, Floats]) -> Flo
     return quat_mul(world[animated], between)
 
 
+def shortest_arc(start: Floats, end: Floats) -> Floats:
+    """Return the smallest rotation that turns the direction `start` onto the direction `end`."""
+    start, end = start / numpy.linalg.norm(start), end / numpy.linalg.norm(end)
+    dot = float(numpy.dot(start, end))
+    if dot < -1 + TINY:
+        axis = numpy.cross(start, [1.0, 0.0, 0.0])
+        if numpy.linalg.norm(axis) < TINY:
+            axis = numpy.cross(start, [0.0, 1.0, 0.0])
+        return numpy.append(axis / numpy.linalg.norm(axis), 0.0)
+    return unit(numpy.append(numpy.cross(start, end), 1.0 + dot))
+
+
+def rest_alignment(
+    motion: Motion, tree: Skeleton, bones: dict[str, int], turn: Floats
+) -> dict[str, Floats]:
+    """Return, per limb bone, the turn that points the character's rest limb like the motion's.
+
+    A character modelled with its arms down (A-pose) and a motion recorded from a T-pose rest
+    differ by that turn, which we apply before the motion so the limbs follow the source.
+    """
+    align: dict[str, Floats] = {}
+    for side in ("_l", "_r"):
+        for bone, child in LIMB_CHILDREN.items():
+            names = (bone + side, child + side)
+            if all(name in bones and name in motion.rest_position for name in names):
+                source = motion.rest_position[names[1]] - motion.rest_position[names[0]]
+                target = tree.rest[bones[names[1]]][:3, 3] - tree.rest[bones[names[0]]][:3, 3]
+                if numpy.linalg.norm(source) > TINY and numpy.linalg.norm(target) > TINY:
+                    align[names[0]] = shortest_arc(target, quat_rotate(turn, source))
+        for leaf, parent in LIMB_ENDS.items():
+            if parent + side in align:
+                align[leaf + side] = align[parent + side]
+    return align
+
+
 def joint_rotations(
     motion: Motion, tree: Skeleton, bones: dict[str, int], turn: Floats
 ) -> dict[int, Floats]:
     """Return each mapped joint's local rotation per frame that gives it the source's world turn."""
     mapped = {joint: bone for bone, joint in bones.items() if bone in motion.rotation}
+    align = rest_alignment(motion, tree, bones, turn)
     world: dict[int, Floats] = {}
     local: dict[int, Floats] = {}
     for joint in tree.order:
@@ -602,7 +647,8 @@ def joint_rotations(
             continue
         delta = quat_mul(motion.rotation[bone], quat_inv(motion.rest_rotation[bone]))
         delta = quat_mul(quat_mul(turn, delta), quat_inv(turn))
-        world[joint] = quat_mul(delta, quat_from_matrix(tree.rest[joint]))
+        rest = quat_mul(align.get(bone, IDENTITY), quat_from_matrix(tree.rest[joint]))
+        world[joint] = quat_mul(delta, rest)
         local[joint] = unit(quat_mul(quat_inv(parent_rotation(tree, joint, world)), world[joint]))
     return local
 
