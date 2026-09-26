@@ -1,0 +1,29 @@
+mode: predict
+debug: False
+experiment_name: quick_inference_skeleton_vroid_forced
+resume_from_checkpoint: experiments/skeleton/articulation-xl_quantization_256/model.ckpt
+
+components:
+  data: quick_inference
+  tokenizer: tokenizer_parts_articulationxl_256
+  transform: inference_ar_transform
+  model: unirig_ar_350m_1024_81920_float32
+  system: ar_inference_vroid_forced
+  data_name: raw_data.npz
+
+writer:
+  __target__: ar
+  output_dir: ~
+  add_num: False
+  repeat: 1
+  export_npz: predict_skeleton
+  export_obj: skeleton
+  export_fbx: skeleton
+
+trainer:
+  max_epochs: 1
+  num_nodes: 1
+  devices: 1
+  precision: bf16-mixed
+  accelerator: gpu
+  strategy: auto

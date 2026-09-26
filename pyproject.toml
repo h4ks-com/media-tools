@@ -41,6 +41,7 @@ package = true
 line-length = 100
 target-version = "py314"
 src = ["src", "tests"]
+extend-exclude = ["rig"]
 
 [tool.ruff.lint]
 select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "PIE", "RET", "RUF", "C90", "PLR", "D"]
@@ -100,7 +101,7 @@ min_confidence = 80
 
 [tool.deptry]
 known_first_party = ["media_tools"]
-exclude = ["venv", "\\.venv", "\\.direnv", "tests", "\\.git"]
+exclude = ["venv", "\\.venv", "\\.direnv", "tests", "\\.git", "rig"]
 per_rule_ignores = { "DEP002" = ["uvicorn"] }
 
 [tool.bandit]

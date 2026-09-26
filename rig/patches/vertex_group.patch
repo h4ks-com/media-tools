@@ -1,0 +1,13 @@
+diff --git a/src/data/vertex_group.py b/src/data/vertex_group.py
+index 9dffbd9..2f96bce 100644
+--- a/src/data/vertex_group.py
++++ b/src/data/vertex_group.py
+@@ -1,7 +1,7 @@
+ import platform
+ import os
+ if platform.system() == "Linux":
+-    os.environ['PYOPENGL_PLATFORM'] = 'egl'
++    os.environ.setdefault('PYOPENGL_PLATFORM', 'egl')
+
+ from typing import Dict, List, Tuple, Literal
+ from dataclasses import dataclass
