@@ -35,7 +35,7 @@ class RigError(Exception):
     pass
 
 
-def run_stage(command: list[str], cwd: Path | None = None) -> None:
+def run_stage(command: list[str], produces: Path, cwd: Path | None = None) -> None:
     try:
         result = subprocess.run(  # nosec B603
             command, cwd=cwd, capture_output=True, timeout=STAGE_TIMEOUT_SECONDS, check=False
@@ -45,6 +45,10 @@ def run_stage(command: list[str], cwd: Path | None = None) -> None:
     if result.returncode != 0:
         output = (result.stderr or result.stdout).decode(errors="replace").strip()
         raise RigError(output[-2000:] or f"{command[0]} failed")
+    # UniRig's scripts exit 0 even when python fails, so we check for the file each stage makes.
+    if not produces.exists():
+        output = (result.stdout + result.stderr).decode(errors="replace").strip()
+        raise RigError(output[-2000:] or f"{command[0]} made no {produces.name}")
 
 
 def check_embedded(data: bytes) -> None:
@@ -70,17 +74,7 @@ def check_embedded(data: bytes) -> None:
                 raise RigError(f"the GLB {key} must be embedded, not linked")
 
 
-def clear_scratch() -> None:
-    scratch = UNIRIG_DIR / "tmp"
-    for entry in scratch.iterdir():
-        if entry.is_dir():
-            shutil.rmtree(entry)
-        else:
-            entry.unlink()
-
-
 def rig(data: bytes) -> bytes:
-    clear_scratch()
     with tempfile.TemporaryDirectory() as workdir_name:
         workdir = Path(workdir_name)
         source = workdir / "input.glb"
@@ -89,8 +83,11 @@ def rig(data: bytes) -> bytes:
         skin = workdir / "skin.fbx"
         rigged = workdir / "rigged.glb"
         source.write_bytes(data)
+        # UniRig writes logs and intermediate files inside its own folder, so each job runs in a copy.
+        repo = workdir / "repo"
+        shutil.copytree(UNIRIG_DIR, repo, symlinks=True)
 
-        run_stage([GLTFPACK, "-i", str(source), "-o", str(decompressed), "-noq"])
+        run_stage([GLTFPACK, "-i", str(source), "-o", str(decompressed), "-noq"], decompressed)
         run_stage(
             [
                 "bash",
@@ -102,7 +99,8 @@ def rig(data: bytes) -> bytes:
                 "--skeleton_task",
                 SKELETON_TASK,
             ],
-            cwd=UNIRIG_DIR,
+            skeleton,
+            cwd=repo,
         )
         run_stage(
             [
@@ -113,7 +111,8 @@ def rig(data: bytes) -> bytes:
                 "--output",
                 str(skin),
             ],
-            cwd=UNIRIG_DIR,
+            skin,
+            cwd=repo,
         )
         run_stage(
             [
@@ -126,10 +125,9 @@ def rig(data: bytes) -> bytes:
                 "--output",
                 str(rigged),
             ],
-            cwd=UNIRIG_DIR,
+            rigged,
+            cwd=repo,
         )
-        if not rigged.exists():
-            raise RigError("no rigged output was produced")
         return rigged.read_bytes()
 
 
