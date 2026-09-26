@@ -3,6 +3,7 @@ from collections.abc import Callable
 import numpy
 import pytest
 
+from conftest import DATA
 from conftest import VROID
 from conftest import add_root
 from conftest import edit
@@ -11,6 +12,7 @@ from media_tools.glb import Document
 from media_tools.glb import GlbError
 from media_tools.glb import read_glb
 from media_tools.glb import write_glb
+from media_tools.mesh import make_opaque
 from media_tools.retarget import FEET
 from media_tools.retarget import KIMODO
 from media_tools.retarget import Floats
@@ -302,6 +304,16 @@ def test_a_character_with_a_meshopt_fallback_buffer_is_accepted(walk: bytes) -> 
     document, binary = read_glb(result)
     assert len(document["buffers"]) == 3
     assert document["buffers"][0]["byteLength"] == len(binary)
+
+
+def test_a_character_from_mesh_takes_the_motion(walk: bytes) -> None:
+    character = make_opaque((DATA / "packed-character.glb").read_bytes())
+
+    result = retarget(character, [("Walk", walk)], in_place=False)
+
+    angle, distance = worst_errors(read_motion(clip(result, 0)), read_motion(walk), STILL)
+    assert angle < 0.5
+    assert distance < 0.01
 
 
 def test_a_character_whose_data_lives_in_a_data_uri_is_refused(walk: bytes) -> None:
