@@ -4,7 +4,9 @@ Reachable only from n8n, with no egress of its own: every tool and model weight 
 baked into the image at build time. One request runs on the GPU at a time.
 """
 
+import json
 import os
+import struct
 import subprocess
 import tempfile
 import threading
@@ -41,6 +43,29 @@ def run_stage(command: list[str], cwd: Path | None = None) -> None:
         raise RigError(f"{command[0]} timed out") from error
     if result.returncode != 0:
         raise RigError(result.stderr.decode(errors="replace")[-2000:] or f"{command[0]} failed")
+
+
+def check_embedded(data: bytes) -> None:
+    """Refuse a GLB that points at files outside itself, since gltfpack and Blender would read them."""
+    if len(data) < 20:
+        raise RigError("the GLB is too short")
+    chunk_length, chunk_type = struct.unpack_from("<II", data, 12)
+    if chunk_type != 0x4E4F534A or 20 + chunk_length > len(data):
+        raise RigError("the GLB has no JSON chunk")
+    try:
+        document = json.loads(data[20 : 20 + chunk_length])
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RigError("the GLB JSON cannot be read") from error
+    if not isinstance(document, dict):
+        raise RigError("the GLB JSON is not an object")
+    for key in ("buffers", "images"):
+        entries = document.get(key, [])
+        if not isinstance(entries, list):
+            raise RigError(f"the GLB {key} are not a list")
+        for entry in entries:
+            uri = entry.get("uri") if isinstance(entry, dict) else None
+            if uri is not None and not (isinstance(uri, str) and uri.startswith("data:")):
+                raise RigError(f"the GLB {key} must be embedded, not linked")
 
 
 def rig(data: bytes) -> bytes:
@@ -121,6 +146,11 @@ async def rig_route(request: Request) -> Response:
     if len(body) != int(declared) or body[:4] != b"glTF":
         raise HTTPException(400, "send a binary GLB (glTF magic header)")
 
+    try:
+        check_embedded(body)
+    except RigError as error:
+        raise HTTPException(400, str(error)) from error
+
     def locked() -> bytes:
         with gpu_slot:
             return rig(body)
@@ -129,4 +159,8 @@ async def rig_route(request: Request) -> Response:
         glb = await run_in_threadpool(locked)
     except RigError as error:
         raise HTTPException(422, str(error)) from error
-    return Response(glb, media_type="model/gltf-binary")
+    return Response(
+        glb,
+        media_type="model/gltf-binary",
+        headers={"Content-Disposition": 'inline; filename="rigged.glb"'},
+    )
