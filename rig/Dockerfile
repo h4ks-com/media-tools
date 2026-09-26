@@ -8,9 +8,11 @@ ENV DEBIAN_FRONTEND=noninteractive \
     PIP_NO_CACHE_DIR=1
 
 # libxi6/libxrender1/libxkbcommon0/libsm6/libgl1 are bpy's headless runtime deps;
-# libegl1/libgles2 and libosmesa6-dev (OSMesa software rendering) are pyrender's.
+# libegl1/libgles2 and libosmesa6-dev (OSMesa software rendering) are pyrender's;
+# libgomp1 is the OpenMP runtime UniRig's compiled packages load.
 RUN apt-get update && apt-get install -y --no-install-recommends \
         git \
+        libgomp1 \
         libxi6 libxrender1 libxkbcommon0 libsm6 libgl1 \
         libegl1 libgles2 \
         libusb-1.0-0 \
