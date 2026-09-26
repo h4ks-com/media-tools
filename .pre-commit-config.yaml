@@ -1,0 +1,9 @@
+repos:
+  - repo: local
+    hooks:
+      - id: media-tools-precommit
+        name: make precommit (ruff format + imports + lint)
+        entry: make precommit
+        language: system
+        pass_filenames: false
+        types_or: [python]

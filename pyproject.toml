@@ -1,0 +1,107 @@
+[project]
+name = "media-tools"
+version = "0.0.0"
+description = "Internal picture and model tools for h4ks n8n workflows"
+readme = "README.md"
+requires-python = ">=3.14"
+dependencies = [
+    "fastapi==0.141.1",
+    "starlette==1.7.0",
+    "uvicorn[standard]==0.53.0",
+    "numpy==2.5.3",
+    "pillow==12.3.0",
+    "onnxruntime==1.30.0",
+]
+
+[dependency-groups]
+dev = [
+    "ruff==0.16.8",
+    "mypy==2.3.1",
+    "pytest==9.1.1",
+    "pytest-cov==7.1.0",
+    "httpx==0.28.1",
+    "vulture==2.16",
+    "deptry==0.25.1",
+    "bandit==1.9.4",
+    "pip-audit==2.10.1",
+    "prek==0.5.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/media_tools"]
+
+[tool.uv]
+package = true
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B", "SIM", "C4", "PIE", "RET", "RUF", "C90", "PLR", "D"]
+# We check the shape of every docstring and write them where they help, so none is forced.
+ignore = ["D100", "D101", "D102", "D103", "D104", "D105", "D106", "D107"]
+fixable = ["ALL"]
+
+[tool.ruff.lint.pydocstyle]
+convention = "pep257"
+
+[tool.ruff.lint.isort]
+force-single-line = true
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-branches = 10
+max-returns = 6
+max-statements = 40
+max-args = 6
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["PLR2004"]
+
+[tool.ruff.format]
+quote-style = "double"
+
+[tool.mypy]
+python_version = "3.14"
+strict = true
+warn_unused_ignores = true
+warn_redundant_casts = true
+warn_return_any = true
+files = ["src/media_tools", "tests"]
+
+[[tool.mypy.overrides]]
+module = ["onnxruntime"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+
+[tool.coverage.run]
+source = ["media_tools"]
+branch = true
+
+[tool.coverage.report]
+fail_under = 90
+show_missing = true
+skip_covered = false
+exclude_also = ["^\\s*\\.\\.\\.$"]
+
+[tool.vulture]
+min_confidence = 80
+
+[tool.deptry]
+known_first_party = ["media_tools"]
+exclude = ["venv", "\\.venv", "\\.direnv", "tests", "\\.git"]
+per_rule_ignores = { "DEP002" = ["uvicorn"] }
+
+[tool.bandit]
+exclude_dirs = ["tests"]

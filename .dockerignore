@@ -1,0 +1,8 @@
+.venv
+.git
+dist
+.pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+tests

@@ -1,0 +1,34 @@
+# secrets and credentials
+.env
+.env.*
+!.env.example
+.rev-ok
+
+# local database
+/data/
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.vulture
+htmlcov/
+.coverage
+.coverage.*
+dist/
+build/
+
+# editor / os
+.DS_Store
+.idea/
+.vscode/
+*.swp
