@@ -210,3 +210,29 @@ def test_rig_gives_up_naming_the_missing_bones(
     fake_unirig(tmp_path, monkeypatch, [partial] * rig_app.RIG_ATTEMPTS)
     with pytest.raises(rig_app.RigError, match="missed J_Bip_C_Hips"):
         rig_app.rig(b"glTF")
+
+
+def generic_skeleton(parents: tuple[int, ...]) -> bytes:
+    nodes: list[dict[str, object]] = [{"name": f"bone_{index}"} for index in range(len(parents))]
+    for index, parent in enumerate(parents):
+        if parent >= 0:
+            children = nodes[parent].setdefault("children", [])
+            assert isinstance(children, list)
+            children.append(index)
+    return document_glb({"nodes": nodes, "skins": [{"joints": list(range(len(parents)))}]})
+
+
+def test_a_generic_vroid_skeleton_gets_vroid_names() -> None:
+    renamed = rig_app.name_vroid_bones(generic_skeleton(rig_app.VROID_PARENTS))
+
+    assert rig_app.joint_names(renamed) == rig_app.VROID_BONES
+    document = rig_app.read_document(renamed)
+    nodes = document["nodes"]
+    assert isinstance(nodes, list)
+    assert nodes[7]["name"] == "J_Bip_L_UpperArm"
+
+
+def test_a_generic_skeleton_of_another_shape_keeps_its_names() -> None:
+    other = generic_skeleton(tuple(index - 1 for index in range(len(rig_app.VROID_PARENTS))))
+
+    assert rig_app.name_vroid_bones(other) == other

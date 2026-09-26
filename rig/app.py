@@ -6,6 +6,7 @@ and the pod mounts the model weights read-only. One request runs on the GPU at a
 
 import json
 import os
+import re
 import shutil
 import signal
 import struct
@@ -30,30 +31,34 @@ STAGE_TIMEOUT_SECONDS = float(os.environ.get("STAGE_TIMEOUT_SECONDS", "600"))
 SKELETON_TASK = "configs/task/quick_inference_skeleton_vroid_forced.yaml"
 MAX_IN_FLIGHT = 2
 RIG_ATTEMPTS = 3
-VROID_BONES = frozenset(
-    [
-        "J_Bip_C_Hips",
-        "J_Bip_C_Spine",
-        "J_Bip_C_Chest",
-        "J_Bip_C_UpperChest",
-        "J_Bip_C_Neck",
-        "J_Bip_C_Head",
-    ]
-    + [
-        f"J_Bip_{side}_{bone}"
-        for side in ("L", "R")
-        for bone in (
-            "Shoulder",
-            "UpperArm",
-            "LowerArm",
-            "Hand",
-            "UpperLeg",
-            "LowerLeg",
-            "Foot",
-            "ToeBase",
-        )
-    ]
+# UniRig's VRoid template lists its 22 bones in this order, each with the parent at that index.
+VROID_ORDER = (
+    "J_Bip_C_Hips",
+    "J_Bip_C_Spine",
+    "J_Bip_C_Chest",
+    "J_Bip_C_UpperChest",
+    "J_Bip_C_Neck",
+    "J_Bip_C_Head",
+    "J_Bip_L_Shoulder",
+    "J_Bip_L_UpperArm",
+    "J_Bip_L_LowerArm",
+    "J_Bip_L_Hand",
+    "J_Bip_R_Shoulder",
+    "J_Bip_R_UpperArm",
+    "J_Bip_R_LowerArm",
+    "J_Bip_R_Hand",
+    "J_Bip_L_UpperLeg",
+    "J_Bip_L_LowerLeg",
+    "J_Bip_L_Foot",
+    "J_Bip_L_ToeBase",
+    "J_Bip_R_UpperLeg",
+    "J_Bip_R_LowerLeg",
+    "J_Bip_R_Foot",
+    "J_Bip_R_ToeBase",
 )
+VROID_PARENTS = (-1, 0, 1, 2, 3, 4, 3, 6, 7, 8, 3, 10, 11, 12, 0, 14, 15, 16, 0, 18, 19, 20)
+VROID_BONES = frozenset(VROID_ORDER)
+GENERIC_BONE = re.compile(r"bone_\d+")
 JSON_CHUNK = 0x4E4F534A
 JSON_START = 20
 
@@ -162,6 +167,54 @@ def joint_names(data: bytes) -> set[str]:
     return names
 
 
+def write_document(data: bytes, document: dict[str, object]) -> bytes:
+    """Return the GLB with its JSON chunk replaced by `document`, keeping the binary chunk."""
+    old_length = struct.unpack_from("<I", data, 12)[0]
+    rest = data[JSON_START + old_length :]
+    text = json.dumps(document, separators=(",", ":")).encode()
+    text += b" " * (-len(text) % 4)
+    chunk = struct.pack("<II", len(text), JSON_CHUNK) + text
+    return data[:8] + struct.pack("<I", 12 + len(chunk) + len(rest)) + chunk + rest
+
+
+def skin_parents(nodes: list[object], joints: list[int]) -> tuple[int, ...]:
+    parent_of = {
+        child: index
+        for index, node in enumerate(nodes)
+        if isinstance(node, dict)
+        for child in node.get("children", [])
+        if isinstance(child, int)
+    }
+    return tuple(joints.index(parent_of[j]) if parent_of.get(j) in joints else -1 for j in joints)
+
+
+def name_vroid_bones(data: bytes) -> bytes:
+    """Give VRoid names to a skin UniRig left with names bone_0 to bone_21.
+
+    UniRig sometimes writes its VRoid template with generic names, so we rename the bones by
+    their place in the template once their parents match it exactly.
+    """
+    document = read_document(data)
+    nodes, skins = document.get("nodes"), document.get("skins")
+    if not isinstance(nodes, list) or not isinstance(skins, list) or len(skins) != 1:
+        return data
+    joints = skins[0].get("joints") if isinstance(skins[0], dict) else None
+    if not isinstance(joints, list) or len(joints) != len(VROID_ORDER):
+        return data
+    if not all(isinstance(j, int) and 0 <= j < len(nodes) for j in joints):
+        return data
+    named = [nodes[j] for j in joints]
+    if not all(
+        isinstance(node, dict) and GENERIC_BONE.fullmatch(str(node.get("name"))) for node in named
+    ):
+        return data
+    if skin_parents(nodes, joints) != VROID_PARENTS:
+        return data
+    for node, name in zip(named, VROID_ORDER, strict=True):
+        node["name"] = name
+    return write_document(data, document)
+
+
 def rig_once(decompressed: Path, attempt: Path, repo: Path, seed: int) -> bytes:
     attempt.mkdir()
     skeleton = attempt / "skeleton.fbx"
@@ -234,6 +287,7 @@ def rig(data: bytes) -> bytes:
             except RigError as error:
                 problem = str(error)
                 continue
+            rigged = name_vroid_bones(rigged)
             missing = VROID_BONES - joint_names(rigged)
             if not missing:
                 return rigged
