@@ -29,6 +29,31 @@ MAX_MODEL_BYTES = 300 * 1024 * 1024
 STAGE_TIMEOUT_SECONDS = float(os.environ.get("STAGE_TIMEOUT_SECONDS", "600"))
 SKELETON_TASK = "configs/task/quick_inference_skeleton_vroid_forced.yaml"
 MAX_IN_FLIGHT = 2
+RIG_ATTEMPTS = 3
+VROID_BONES = frozenset(
+    [
+        "J_Bip_C_Hips",
+        "J_Bip_C_Spine",
+        "J_Bip_C_Chest",
+        "J_Bip_C_UpperChest",
+        "J_Bip_C_Neck",
+        "J_Bip_C_Head",
+    ]
+    + [
+        f"J_Bip_{side}_{bone}"
+        for side in ("L", "R")
+        for bone in (
+            "Shoulder",
+            "UpperArm",
+            "LowerArm",
+            "Hand",
+            "UpperLeg",
+            "LowerLeg",
+            "Foot",
+            "ToeBase",
+        )
+    ]
+)
 JSON_CHUNK = 0x4E4F534A
 JSON_START = 20
 
@@ -86,8 +111,11 @@ def refuse_constant(name: str) -> float:
     raise RigError(f"the GLB JSON holds {name}")
 
 
-def check_embedded(data: bytes) -> None:
-    """Refuse a GLB that points at files outside itself, since gltfpack and Blender read them."""
+def read_document(data: bytes) -> dict[str, object]:
+    """Read the JSON document of a GLB.
+
+    :raises RigError: when the data holds no readable JSON object.
+    """
     if len(data) < JSON_START:
         raise RigError("the GLB is too short")
     chunk_length, chunk_type = struct.unpack_from("<II", data, 12)
@@ -100,6 +128,12 @@ def check_embedded(data: bytes) -> None:
         raise RigError("the GLB JSON cannot be read") from error
     if not isinstance(document, dict):
         raise RigError("the GLB JSON is not an object")
+    return document
+
+
+def check_embedded(data: bytes) -> None:
+    """Refuse a GLB that points at files outside itself, since gltfpack and Blender read them."""
+    document = read_document(data)
     for key in ("buffers", "images"):
         entries = document.get(key, [])
         if not isinstance(entries, list):
@@ -112,61 +146,99 @@ def check_embedded(data: bytes) -> None:
                 raise RigError(f"the GLB {key} must embed their data")
 
 
+def joint_names(data: bytes) -> set[str]:
+    document = read_document(data)
+    nodes = document.get("nodes", [])
+    skins = document.get("skins", [])
+    if not isinstance(nodes, list) or not isinstance(skins, list):
+        return set()
+    names = set()
+    for skin in skins:
+        joints = skin.get("joints", []) if isinstance(skin, dict) else []
+        for joint in joints if isinstance(joints, list) else []:
+            node = nodes[joint] if isinstance(joint, int) and 0 <= joint < len(nodes) else None
+            if isinstance(node, dict) and isinstance(node.get("name"), str):
+                names.add(node["name"])
+    return names
+
+
+def rig_once(decompressed: Path, attempt: Path, repo: Path, seed: int) -> bytes:
+    attempt.mkdir()
+    skeleton = attempt / "skeleton.fbx"
+    skin = attempt / "skin.fbx"
+    rigged = attempt / "rigged.glb"
+    run_stage(
+        [
+            "bash",
+            "launch/inference/generate_skeleton.sh",
+            "--input",
+            str(decompressed),
+            "--output",
+            str(skeleton),
+            "--skeleton_task",
+            SKELETON_TASK,
+            "--seed",
+            str(seed),
+        ],
+        skeleton,
+        cwd=repo,
+    )
+    run_stage(
+        [
+            "bash",
+            "launch/inference/generate_skin.sh",
+            "--input",
+            str(skeleton),
+            "--output",
+            str(skin),
+        ],
+        skin,
+        cwd=repo,
+    )
+    run_stage(
+        [
+            "bash",
+            "launch/inference/merge.sh",
+            "--source",
+            str(skin),
+            "--target",
+            str(decompressed),
+            "--output",
+            str(rigged),
+        ],
+        rigged,
+        cwd=repo,
+    )
+    return rigged.read_bytes()
+
+
 def rig(data: bytes) -> bytes:
+    """Rig a humanoid GLB with the 22 VRoid body bones.
+
+    :raises RigError: when a stage fails or no attempt finds every VRoid bone.
+    """
     with tempfile.TemporaryDirectory() as workdir_name:
         workdir = Path(workdir_name)
         source = workdir / "input.glb"
         decompressed = workdir / "decompressed.glb"
-        skeleton = workdir / "skeleton.fbx"
-        skin = workdir / "skin.fbx"
-        rigged = workdir / "rigged.glb"
         source.write_bytes(data)
         # UniRig writes logs and scratch files inside its own folder, so we run each job in a copy.
         repo = workdir / "repo"
         shutil.copytree(UNIRIG_DIR, repo, symlinks=True)
-
         run_stage([GLTFPACK, "-i", str(source), "-o", str(decompressed), "-noq"], decompressed)
-        run_stage(
-            [
-                "bash",
-                "launch/inference/generate_skeleton.sh",
-                "--input",
-                str(decompressed),
-                "--output",
-                str(skeleton),
-                "--skeleton_task",
-                SKELETON_TASK,
-            ],
-            skeleton,
-            cwd=repo,
-        )
-        run_stage(
-            [
-                "bash",
-                "launch/inference/generate_skin.sh",
-                "--input",
-                str(skeleton),
-                "--output",
-                str(skin),
-            ],
-            skin,
-            cwd=repo,
-        )
-        run_stage(
-            [
-                "bash",
-                "launch/inference/merge.sh",
-                "--source",
-                str(skin),
-                "--target",
-                str(decompressed),
-                "--output",
-                str(rigged),
-            ],
-            rigged,
-            cwd=repo,
-        )
-        return rigged.read_bytes()
+        # UniRig samples the skeleton, so an attempt can miss bones that a new seed finds.
+        problem = ""
+        for seed in range(RIG_ATTEMPTS):
+            try:
+                rigged = rig_once(decompressed, workdir / f"attempt-{seed}", repo, seed)
+            except RigError as error:
+                problem = str(error)
+                continue
+            missing = VROID_BONES - joint_names(rigged)
+            if not missing:
+                return rigged
+            problem = "the skeleton missed " + ", ".join(sorted(missing))
+        raise RigError(f"no humanoid skeleton after {RIG_ATTEMPTS} tries: {problem[-1500:]}")
 
 
 @app.exception_handler(HTTPException)

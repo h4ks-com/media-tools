@@ -151,3 +151,62 @@ def test_a_failed_rig_is_a_422(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_healthz() -> None:
     assert client.get("/healthz").text == "ok"
+
+
+def skinned_glb(names: list[str]) -> bytes:
+    return document_glb(
+        {
+            "nodes": [{"name": name} for name in names],
+            "skins": [{"joints": list(range(len(names)))}],
+        }
+    )
+
+
+def fake_unirig(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, results: list[bytes | str]
+) -> list[int]:
+    repo = tmp_path / "unirig"
+    repo.mkdir()
+    monkeypatch.setattr(rig_app, "UNIRIG_DIR", repo)
+    monkeypatch.setattr(rig_app, "run_stage", lambda command, produces, cwd=None: produces.touch())
+    seeds: list[int] = []
+
+    def rig_once(decompressed: Path, attempt: Path, repo: Path, seed: int) -> bytes:
+        seeds.append(seed)
+        result = results[len(seeds) - 1]
+        if isinstance(result, str):
+            raise rig_app.RigError(result)
+        return result
+
+    monkeypatch.setattr(rig_app, "rig_once", rig_once)
+    return seeds
+
+
+def test_joint_names_reads_every_skin() -> None:
+    document = {
+        "nodes": [{"name": "J_Bip_C_Hips"}, {"name": "J_Bip_C_Head"}, {"name": "Mesh"}],
+        "skins": [{"joints": [0]}, {"joints": [1, 9]}],
+    }
+    assert rig_app.joint_names(document_glb(document)) == {"J_Bip_C_Hips", "J_Bip_C_Head"}
+
+
+def test_rig_tries_new_seeds_until_every_vroid_bone_is_there(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    complete = skinned_glb(sorted(rig_app.VROID_BONES))
+    seeds = fake_unirig(
+        tmp_path,
+        monkeypatch,
+        ["skeleton.fbx was not made", skinned_glb(["J_Bip_C_Head"]), complete],
+    )
+    assert rig_app.rig(b"glTF") == complete
+    assert seeds == [0, 1, 2]
+
+
+def test_rig_gives_up_naming_the_missing_bones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    partial = skinned_glb(sorted(rig_app.VROID_BONES - {"J_Bip_C_Hips"}))
+    fake_unirig(tmp_path, monkeypatch, [partial] * rig_app.RIG_ATTEMPTS)
+    with pytest.raises(rig_app.RigError, match="missed J_Bip_C_Hips"):
+        rig_app.rig(b"glTF")
