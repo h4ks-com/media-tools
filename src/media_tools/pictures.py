@@ -8,11 +8,14 @@ import numpy
 import onnxruntime
 from numpy.typing import NDArray
 from PIL import Image
+from PIL import ImageOps
 
 type CutMethod = Literal["isnet", "key"]
 
 MODEL_SIZE = (1024, 1024)
+FORMATS = ["PNG", "JPEG", "WEBP"]
 MAX_PIXELS = 4096 * 4096
+MAX_SPRITE_PIXELS = 2 * MAX_PIXELS
 # Colours within KEY_NEAR of the background become fully transparent, and fade in until KEY_FAR.
 KEY_NEAR = 40
 KEY_FAR = 80
@@ -24,15 +27,35 @@ SOLID = 128
 Image.MAX_IMAGE_PIXELS = MAX_PIXELS
 
 
-def open_picture(data: bytes) -> Image.Image:
-    """Decode a picture fully.
+class PictureError(ValueError):
+    pass
 
-    :raises PIL.UnidentifiedImageError: when the data is no picture PIL reads.
-    :raises PIL.Image.DecompressionBombError: when the picture is larger than MAX_PIXELS.
+
+def peek(data: bytes) -> Image.Image:
+    """Read a picture's header only.
+
+    :raises PictureError: when the data is no PNG, JPEG or WebP, or holds over MAX_PIXELS pixels.
     """
-    picture = Image.open(io.BytesIO(data))
-    picture.load()
+    try:
+        picture = Image.open(io.BytesIO(data), formats=FORMATS)
+    except (OSError, Image.DecompressionBombError) as error:
+        raise PictureError(f"send a PNG, JPEG or WebP picture: {error}") from error
+    if picture.width * picture.height > MAX_PIXELS:
+        raise PictureError(f"the picture has more than {MAX_PIXELS} pixels")
     return picture
+
+
+def open_picture(data: bytes) -> Image.Image:
+    """Decode a picture fully, turned upright as its EXIF orientation says.
+
+    :raises PictureError: when the data is no whole PNG, JPEG or WebP of at most MAX_PIXELS.
+    """
+    picture = peek(data)
+    try:
+        picture.load()
+    except (OSError, Image.DecompressionBombError) as error:
+        raise PictureError(f"the picture is broken: {error}") from error
+    return ImageOps.exif_transpose(picture)
 
 
 def png_bytes(picture: Image.Image) -> bytes:
@@ -141,8 +164,12 @@ def sprite_frames(frame_files: Sequence[bytes], size: int, colors: int) -> list[
     Frames are `size` tall. We crop every frame to one box that holds the character in all of them,
     so it keeps its place.
 
+    :raises PictureError: when a frame is unreadable, or all hold over MAX_SPRITE_PIXELS pixels.
     :raises ValueError: when the frames differ in size or one has no character.
     """
+    sizes = [peek(data).size for data in frame_files]
+    if sum(width * height for width, height in sizes) > MAX_SPRITE_PIXELS:
+        raise PictureError(f"the frames hold more than {MAX_SPRITE_PIXELS} pixels together")
     frames = [keyed(data) for data in frame_files]
     if len({frame.size for frame in frames}) != 1:
         raise ValueError("the frames differ in size")

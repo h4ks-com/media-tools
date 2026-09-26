@@ -1,17 +1,22 @@
 import io
+from collections.abc import Callable
 
 import numpy
 import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from conftest import edit
+from conftest import glb_with_json
 from conftest import png
 from conftest import vroid_rig
 from media_tools import app as app_module
 from media_tools import mesh
+from media_tools.glb import Document
 from media_tools.glb import read_glb
 
 client = TestClient(app_module.app)
+lenient = TestClient(app_module.app, raise_server_exceptions=False)
 
 
 def post(path: str, body: bytes) -> tuple[int, bytes]:
@@ -156,6 +161,90 @@ def test_retarget_refuses_large_motions(walk: bytes, monkeypatch: pytest.MonkeyP
     status, _ = post(f"/retarget?lengths={len(character)},{len(walk)}&names=Walk", character + walk)
 
     assert status == 400
+
+
+def test_requests_beyond_the_in_flight_cap_are_told_to_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(app_module, "in_flight", app_module.MAX_IN_FLIGHT)
+
+    assert post("/pixelate", png((32, 32))) == (429, b"busy, try again")
+
+
+@pytest.mark.parametrize(
+    ("path", "body"),
+    [
+        ("/pixelate?size=16", [png((64, 64), (10, 10, 50, 50))]),
+        ("/sprite-frames?size=16", [png((64, 64), (10, 10, 50, 50))] * 2),
+    ],
+)
+def test_picture_work_runs_in_the_heavy_slot(
+    monkeypatch: pytest.MonkeyPatch, path: str, body: list[bytes]
+) -> None:
+    slotted: list[bool] = []
+
+    def in_slot(work: Callable[[], bytes]) -> bytes:
+        slotted.append(True)
+        return work()
+
+    monkeypatch.setattr(app_module, "in_slot", in_slot)
+    lengths = ",".join(str(len(part)) for part in body)
+
+    status, _ = post(f"{path}&lengths={lengths}", b"".join(body))
+
+    assert (status, slotted) == (200, [True])
+
+
+def bad_json(_: bytes) -> bytes:
+    return glb_with_json(b"{not json")
+
+
+def far_accessor(walk: bytes) -> bytes:
+    def spoil(document: Document, _: bytearray) -> None:
+        document["accessors"][1]["byteOffset"] = 10**9
+
+    return edit(walk, spoil)
+
+
+def short_sampler(walk: bytes) -> bytes:
+    def spoil(document: Document, _: bytearray) -> None:
+        document["accessors"][1]["count"] = 100
+
+    return edit(walk, spoil)
+
+
+def numbered_node(walk: bytes) -> bytes:
+    def spoil(document: Document, _: bytearray) -> None:
+        document["nodes"][3]["name"] = 5
+
+    return edit(walk, spoil)
+
+
+@pytest.mark.parametrize("spoil", [bad_json, far_accessor, short_sampler, numbered_node])
+def test_broken_motions_are_a_422_never_a_500(walk: bytes, spoil: Callable[[bytes], bytes]) -> None:
+    character, motion = vroid_rig(walk), spoil(walk)
+
+    response = lenient.post(
+        f"/retarget?lengths={len(character)},{len(motion)}&names=Walk", content=character + motion
+    )
+
+    assert response.status_code == 422
+
+
+def test_a_broken_mesh_is_a_400_never_a_500() -> None:
+    assert lenient.post("/mesh", content=glb_with_json(b"{not json")).status_code == 400
+
+
+@pytest.mark.parametrize("path", ["/pixelate", "/cutout?method=key", "/sprite-frames"])
+def test_a_truncated_picture_is_a_400_never_a_500(path: str) -> None:
+    whole = png((64, 64), (10, 10, 50, 50))
+    frames = [whole[:-40], whole[:-40]] if path == "/sprite-frames" else [whole[:-40]]
+    joiner = "&" if "?" in path else "?"
+    lengths = ",".join(str(len(frame)) for frame in frames)
+
+    response = lenient.post(f"{path}{joiner}lengths={lengths}", content=b"".join(frames))
+
+    assert response.status_code == 400
 
 
 def test_retarget_onto_an_unrigged_model_is_a_422(walk: bytes) -> None:

@@ -2,19 +2,23 @@
 
 For every humanoid bone we take how far the source bone turned from its rest pose, in world space,
 and apply that turn to the character's bone from its own rest pose. The motion is turned about the
-vertical axis when the two skeletons face different ways, and hip travel is scaled by hip height.
+vertical axis when the two skeletons face different ways. The hips keep the source's height above
+the ground and its travel, both scaled by the ratio of the two standing hip heights.
 """
 
 import re
-import struct
+from collections.abc import Iterable
 from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Any
 
 import numpy
 from numpy.typing import NDArray
 
 from media_tools.glb import Document
+from media_tools.glb import GlbError
+from media_tools.glb import entries
+from media_tools.glb import index_into
+from media_tools.glb import natural
 from media_tools.glb import read_glb
 from media_tools.glb import write_glb
 
@@ -22,8 +26,18 @@ type Floats = NDArray[numpy.float64]
 
 FLOAT = 5126
 COMPONENTS = {"SCALAR": 1, "VEC3": 3, "VEC4": 4}
+TRACK_TYPES = {"rotation": "VEC4", "translation": "VEC3", "scale": "VEC3"}
 IDENTITY = numpy.array([0.0, 0.0, 0.0, 1.0])
+ORIGIN = numpy.zeros(3)
+UNIT_SCALE = numpy.ones(3)
 REQUIRED_BONES = {"hips", "upperleg_l", "upperleg_r", "upperarm_l", "upperarm_r"}
+MOTION_BONES = {"hips", "upperleg_l", "upperleg_r"}
+FEET = ("foot_l", "foot_r", "toe_l", "toe_r")
+MAX_NODES = 2000
+MAX_JOINTS = 1000
+MAX_FRAMES = 10_000
+MAX_MOTION_NODES = 128
+TINY = 1e-9
 
 # Every rig names humanoid bones its own way, so we map rigged characters (VRoid, Mixamo and
 # Blender-style names) to one vocabulary; Kimodo's SOMA skeleton has its own table below.
@@ -50,6 +64,8 @@ SIDE_PATTERNS = [
 ]
 PREFIX = re.compile(r"^(mixamorig\d*:|def-)")
 SIDE_MARK = re.compile(r"^(j_bip_[clr]_|left|right|[lr]_)|(\.[lr]|_[lr]|left|right)$")
+# Mixamo also has Hips and LeftLeg, so we know Kimodo only by the shin name no other rig uses.
+KIMODO_MARK = "LeftShin"
 KIMODO = {
     "Hips": "hips",
     "Spine1": "spine",
@@ -82,14 +98,33 @@ class RetargetError(ValueError):
 
 @dataclass(frozen=True)
 class Motion:
-    """A skeleton animation: frame times and each node's world rotation and position per frame."""
+    """A skeleton animation: frame times, and each humanoid bone's world pose at rest and per frame.
+
+    Every dictionary is keyed by the shared bone name, such as upperarm_l.
+    """
 
     times: Floats
     rest_rotation: dict[str, Floats]
     rest_position: dict[str, Floats]
     rotation: dict[str, Floats]
     position: dict[str, Floats]
-    bones: dict[str, str]
+
+
+@dataclass(frozen=True)
+class Skeleton:
+    """A glTF node tree: each node's parent, a parents-first order and each node's rest world."""
+
+    nodes: list[Document]
+    parent_of: dict[int, int]
+    order: list[int]
+    rest: list[Floats]
+
+    def chain(self, index: int) -> list[int]:
+        """Return the node and its ancestors, nearest first."""
+        chain = [index]
+        while chain[-1] in self.parent_of:
+            chain.append(self.parent_of[chain[-1]])
+        return chain
 
 
 def canonical(name: str) -> str | None:
@@ -130,126 +165,311 @@ def quat_rotate(q: Floats, vector: Floats) -> Floats:
     return rotated
 
 
+def unit(q: Floats) -> Floats:
+    """Return quaternions scaled to length one.
+
+    :raises RetargetError: when one has no length.
+    """
+    lengths = numpy.linalg.norm(q, axis=-1, keepdims=True)
+    if (lengths < TINY).any():
+        raise RetargetError("a rotation has zero length")
+    scaled: Floats = q / lengths
+    return scaled
+
+
 def quat_from_matrix(matrix: Floats) -> Floats:
-    """Return the rotation of a 4x4 matrix as a quaternion, ignoring its scale."""
-    m = matrix[:3, :3] / numpy.linalg.norm(matrix[:3, :3], axis=0)
-    trace = m[0, 0] + m[1, 1] + m[2, 2]
-    if trace > 0:
-        s = 2.0 * numpy.sqrt(trace + 1.0)
-        q = [(m[2, 1] - m[1, 2]) / s, (m[0, 2] - m[2, 0]) / s, (m[1, 0] - m[0, 1]) / s, s / 4]
-    elif m[0, 0] > m[1, 1] and m[0, 0] > m[2, 2]:
-        s = 2.0 * numpy.sqrt(1.0 + m[0, 0] - m[1, 1] - m[2, 2])
-        q = [s / 4, (m[0, 1] + m[1, 0]) / s, (m[0, 2] + m[2, 0]) / s, (m[2, 1] - m[1, 2]) / s]
-    elif m[1, 1] > m[2, 2]:
-        s = 2.0 * numpy.sqrt(1.0 + m[1, 1] - m[0, 0] - m[2, 2])
-        q = [(m[0, 1] + m[1, 0]) / s, s / 4, (m[1, 2] + m[2, 1]) / s, (m[0, 2] - m[2, 0]) / s]
-    else:
-        s = 2.0 * numpy.sqrt(1.0 + m[2, 2] - m[0, 0] - m[1, 1])
-        q = [(m[0, 2] + m[2, 0]) / s, (m[1, 2] + m[2, 1]) / s, s / 4, (m[1, 0] - m[0, 1]) / s]
-    quaternion = numpy.array(q, dtype=numpy.float64)
-    normalized: Floats = quaternion / numpy.linalg.norm(quaternion)
-    return normalized
+    """Return the rotation of 4x4 matrices as quaternions, ignoring their scale.
 
-
-def local_matrix(node: dict[str, Any]) -> Floats:
-    if "matrix" in node:
-        return numpy.array(node["matrix"], dtype=numpy.float64).reshape(4, 4).T
-    x, y, z, w = node.get("rotation", [0.0, 0.0, 0.0, 1.0])
-    rotation = numpy.array(
+    :raises RetargetError: when a matrix scales an axis to nothing.
+    """
+    basis = matrix[..., :3, :3]
+    lengths = numpy.linalg.norm(basis, axis=-2, keepdims=True)
+    if (lengths < TINY).any():
+        raise RetargetError("a node has zero scale")
+    m = basis / lengths
+    xx, yy, zz = m[..., 0, 0], m[..., 1, 1], m[..., 2, 2]
+    xy, yx = m[..., 0, 1] + m[..., 1, 0], m[..., 1, 0] - m[..., 0, 1]
+    xz, zx = m[..., 0, 2] + m[..., 2, 0], m[..., 0, 2] - m[..., 2, 0]
+    yz, zy = m[..., 1, 2] + m[..., 2, 1], m[..., 2, 1] - m[..., 1, 2]
+    candidates = numpy.stack(
         [
-            [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
-            [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
-            [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
-        ]
+            numpy.stack([zy, zx, yx, 1 + xx + yy + zz], axis=-1),
+            numpy.stack([1 + xx - yy - zz, xy, xz, zy], axis=-1),
+            numpy.stack([xy, 1 - xx + yy - zz, yz, zx], axis=-1),
+            numpy.stack([xz, yz, 1 - xx - yy + zz, yx], axis=-1),
+        ],
+        axis=-2,
     )
-    matrix = numpy.eye(4)
-    matrix[:3, :3] = rotation * numpy.array(node.get("scale", [1.0, 1.0, 1.0]))
-    matrix[:3, 3] = node.get("translation", [0.0, 0.0, 0.0])
+    best = numpy.argmax(candidates[..., [0, 1, 2, 3], [3, 0, 1, 2]], axis=-1)
+    chosen = numpy.take_along_axis(candidates, best[..., None, None], axis=-2)[..., 0, :]
+    return unit(chosen)
+
+
+def matrix_from_quat(q: Floats) -> Floats:
+    x, y, z, w = numpy.moveaxis(q, -1, 0)
+    rows = [
+        [1 - 2 * (y * y + z * z), 2 * (x * y - z * w), 2 * (x * z + y * w)],
+        [2 * (x * y + z * w), 1 - 2 * (x * x + z * z), 2 * (y * z - x * w)],
+        [2 * (x * z - y * w), 2 * (y * z + x * w), 1 - 2 * (x * x + y * y)],
+    ]
+    return numpy.stack([numpy.stack(row, axis=-1) for row in rows], axis=-2)
+
+
+def compose(rotation: Floats, translation: Floats, scale: Floats) -> Floats:
+    """Return the 4x4 matrices of translation, rotation and scale, over any leading axes."""
+    shape = numpy.broadcast_shapes(rotation.shape[:-1], translation.shape[:-1], scale.shape[:-1])
+    matrix = numpy.zeros((*shape, 4, 4))
+    matrix[..., :3, :3] = matrix_from_quat(rotation) * scale[..., None, :]
+    matrix[..., :3, 3] = translation
+    matrix[..., 3, 3] = 1.0
     return matrix
 
 
-def parents(document: Document) -> dict[int, int]:
-    return {
-        child: index
-        for index, node in enumerate(document.get("nodes", []))
-        for child in node.get("children", [])
-    }
+def numbers(node: Document, key: str, default: Floats) -> Floats:
+    """Return a node's list of numbers under `key`, or the default when it has none.
+
+    :raises GlbError: when it is not a list of as many finite numbers as the default.
+    """
+    value = node.get(key)
+    if value is None:
+        return default
+    if (
+        not isinstance(value, list)
+        or len(value) != len(default)
+        or not all(isinstance(item, int | float) and not isinstance(item, bool) for item in value)
+    ):
+        raise GlbError(f"a node's {key} is not {len(default)} numbers")
+    array = numpy.array(value, dtype=numpy.float64)
+    if not numpy.isfinite(array).all():
+        raise GlbError(f"a node's {key} is not finite")
+    return array
 
 
-def topological(count: int, parent_of: dict[int, int]) -> list[int]:
-    """Order node indices so every parent comes before its children."""
+def local_matrix(node: Document) -> Floats:
+    if "matrix" in node:
+        matrix: Floats = numbers(node, "matrix", numpy.eye(4).ravel()).reshape(4, 4).T
+        return matrix
+    return compose(
+        unit(numbers(node, "rotation", IDENTITY)),
+        numbers(node, "translation", ORIGIN),
+        numbers(node, "scale", UNIT_SCALE),
+    )
+
+
+def parents_first(count: int, parent_of: dict[int, int]) -> list[int]:
+    """Order node indices so every parent comes before its children.
+
+    :raises GlbError: when the nodes form a loop.
+    """
     order: list[int] = []
-    seen: set[int] = set()
+    placed: set[int] = set()
     for start in range(count):
-        chain = []
+        chain: list[int] = []
         index: int | None = start
-        while index is not None and index not in seen:
+        while index is not None and index not in placed:
+            if index in chain:
+                raise GlbError("the nodes form a loop")
             chain.append(index)
-            seen.add(index)
             index = parent_of.get(index)
         order.extend(reversed(chain))
+        placed.update(chain)
     return order
 
 
-def world_matrices(document: Document) -> dict[int, Floats]:
-    nodes = document.get("nodes", [])
-    parent_of = parents(document)
-    worlds: dict[int, Floats] = {}
-    for index in topological(len(nodes), parent_of):
+def skeleton(document: Document) -> Skeleton:
+    """Read a document's node tree and every node's rest world matrix.
+
+    :raises GlbError: when the nodes do not form a tree.
+    :raises RetargetError: when there are more than MAX_NODES.
+    """
+    nodes = entries(document, "nodes")
+    if len(nodes) > MAX_NODES:
+        raise RetargetError(f"a file has more than {MAX_NODES} nodes")
+    parent_of: dict[int, int] = {}
+    for index, node in enumerate(nodes):
+        children = node.get("children", [])
+        if not isinstance(children, list):
+            raise GlbError("a node's children are not a list")
+        for child in children:
+            child_index = index_into(child, nodes, "a node's child")
+            if child_index in parent_of:
+                raise GlbError("a node has two parents")
+            parent_of[child_index] = index
+    order = parents_first(len(nodes), parent_of)
+    rest = [numpy.eye(4)] * len(nodes)
+    for index in order:
         local = local_matrix(nodes[index])
-        worlds[index] = worlds[parent_of[index]] @ local if index in parent_of else local
-    return worlds
+        rest[index] = rest[parent_of[index]] @ local if index in parent_of else local
+    return Skeleton(nodes, parent_of, order, rest)
 
 
-def read_floats(document: Document, binary: bytes | bytearray, index: int) -> Floats:
-    spec = document["accessors"][index]
-    if spec["componentType"] != FLOAT or spec["type"] not in COMPONENTS:
-        raise RetargetError("only float animation data is supported")
-    view = document["bufferViews"][spec["bufferView"]]
-    width = COMPONENTS[spec["type"]]
-    start = view.get("byteOffset", 0) + spec.get("byteOffset", 0)
-    stride = view.get("byteStride", 4 * width)
-    row = struct.Struct(f"<{width}f")
-    rows = [row.unpack_from(binary, start + number * stride) for number in range(spec["count"])]
-    return numpy.array(rows, dtype=numpy.float64).reshape(spec["count"], width)
+def bone_map(tree: Skeleton, candidates: Iterable[int]) -> dict[str, int]:
+    """Return the humanoid bones among the candidate nodes; the first node wins a shared name.
+
+    :raises GlbError: when a node's name is not text.
+    """
+    names: dict[int, str] = {}
+    for index in candidates:
+        name = tree.nodes[index].get("name", "")
+        if not isinstance(name, str):
+            raise GlbError("a node's name is not text")
+        names[index] = name
+    kimodo = KIMODO_MARK in names.values()
+    found: dict[str, int] = {}
+    for index, name in names.items():
+        bone = KIMODO.get(name) if kimodo else canonical(name)
+        if bone and bone not in found:
+            found[bone] = index
+    return found
 
 
-def append_floats(document: Document, binary: bytearray, values: Floats, kind: str) -> int:
-    data = numpy.ascontiguousarray(values, dtype=numpy.float32)
-    binary.extend(b"\0" * (-len(binary) % 4))
-    view = {"buffer": 0, "byteOffset": len(binary), "byteLength": data.nbytes}
-    document.setdefault("bufferViews", []).append(view)
-    binary.extend(data.tobytes())
-    spec: dict[str, Any] = {
-        "bufferView": len(document["bufferViews"]) - 1,
-        "componentType": FLOAT,
-        "count": len(data),
-        "type": kind,
-    }
-    if kind == "SCALAR":
-        spec["min"], spec["max"] = [float(data.min())], [float(data.max())]
-    document.setdefault("accessors", []).append(spec)
-    return len(document["accessors"]) - 1
+def accessor_span(document: Document, spec: Document, count: int, size: int) -> tuple[int, int]:
+    """Return where an accessor starts in the binary buffer and the stride between its rows.
+
+    :raises GlbError: when its rows overlap or reach past its bufferView or the buffer.
+    :raises RetargetError: when the data lives outside the GLB's binary buffer.
+    """
+    views = entries(document, "bufferViews")
+    view = views[index_into(spec.get("bufferView"), views, "an accessor's bufferView")]
+    if view.get("buffer") != 0:
+        raise RetargetError("the animation data must live in the GLB")
+    view_start = natural(view.get("byteOffset", 0), "a bufferView byteOffset")
+    view_end = view_start + natural(view.get("byteLength"), "a bufferView byteLength")
+    start = view_start + natural(spec.get("byteOffset", 0), "an accessor byteOffset")
+    stride = natural(view.get("byteStride", 0), "a byteStride") or size
+    if stride < size:
+        raise GlbError("a byteStride is shorter than its element")
+    if start + (count - 1) * stride + size > view_end:
+        raise GlbError("an accessor reaches past its bufferView")
+    return start, stride
 
 
-def _channels(
-    document: Document, binary: bytes | bytearray, clip: dict[str, Any]
-) -> tuple[Floats, dict[str, dict[str, Floats]]]:
-    nodes = document["nodes"]
-    times: Floats | None = None
-    tracks: dict[str, dict[str, Floats]] = {"rotation": {}, "translation": {}}
-    for channel in clip.get("channels", []):
-        sampler = clip["samplers"][channel["sampler"]]
-        path = channel["target"].get("path")
-        if path not in tracks:
+def read_floats(document: Document, binary: bytearray, index: object, kind: str) -> Floats:
+    """Return an accessor of float SCALAR, VEC3 or VEC4 rows as a (count, width) array.
+
+    :raises GlbError: when the accessor does not fit its buffer.
+    :raises RetargetError: when it holds other data, too many rows or numbers that are not finite.
+    """
+    accessors = entries(document, "accessors")
+    spec = accessors[index_into(index, accessors, "an animation sampler")]
+    if spec.get("componentType") != FLOAT or spec.get("type") != kind or "sparse" in spec:
+        raise RetargetError(f"only plain float {kind} animation data is supported")
+    count = natural(spec.get("count"), "an accessor count")
+    if not 0 < count <= MAX_FRAMES:
+        raise RetargetError(f"an animation needs 1 to {MAX_FRAMES} keys")
+    width = COMPONENTS[kind]
+    start, stride = accessor_span(document, spec, count, 4 * width)
+    if start + (count - 1) * stride + 4 * width > len(binary):
+        raise GlbError("an accessor reaches past the binary buffer")
+    rows = numpy.ndarray(
+        (count, width), dtype="<f4", buffer=binary, offset=start, strides=(stride, 4)
+    )
+    values = rows.astype(numpy.float64)
+    if not numpy.isfinite(values).all():
+        raise RetargetError("the animation holds numbers that are not finite")
+    return values
+
+
+def read_track(
+    document: Document, binary: bytearray, sampler: Document, kind: str
+) -> tuple[Floats, Floats, bool]:
+    """Return a sampler's key times, its values and whether it steps between keys.
+
+    :raises RetargetError: when it is cubic, or its times and values do not line up.
+    """
+    interpolation = sampler.get("interpolation", "LINEAR")
+    if interpolation not in ("LINEAR", "STEP"):
+        raise RetargetError("only LINEAR and STEP animation is supported")
+    times = read_floats(document, binary, sampler.get("input"), "SCALAR")[:, 0]
+    values = read_floats(document, binary, sampler.get("output"), kind)
+    if len(values) != len(times):
+        raise RetargetError("an animation sampler has more or fewer values than key times")
+    if (numpy.diff(times) <= 0).any():
+        raise RetargetError("an animation sampler's key times do not rise")
+    return times, values, interpolation == "STEP"
+
+
+def slerp(a: Floats, b: Floats, weight: Floats) -> Floats:
+    dot = (a * b).sum(axis=-1, keepdims=True)
+    b = numpy.where(dot < 0, -b, b)
+    angle = numpy.arccos(numpy.clip(numpy.abs(dot), 0.0, 1.0))
+    sine = numpy.sin(angle)
+    near = sine < TINY
+    safe = numpy.where(near, 1.0, sine)
+    weight_a = numpy.where(near, 1 - weight, numpy.sin((1 - weight) * angle) / safe)
+    weight_b = numpy.where(near, weight, numpy.sin(weight * angle) / safe)
+    return unit(weight_a * a + weight_b * b)
+
+
+def resample(times: Floats, values: Floats, step: bool, timeline: Floats, spin: bool) -> Floats:
+    """Return a track's values at the timeline's times, holding its first and last keys."""
+    after = numpy.searchsorted(times, timeline, side="right")
+    if step or len(times) == 1:
+        held: Floats = values[numpy.clip(after - 1, 0, len(times) - 1)]
+        return held
+    first = numpy.clip(after - 1, 0, len(times) - 2)
+    span = times[first + 1] - times[first]
+    weight = numpy.clip((timeline - times[first]) / span, 0.0, 1.0)[:, None]
+    if spin:
+        return slerp(values[first], values[first + 1], weight)
+    blended: Floats = values[first] + (values[first + 1] - values[first]) * weight
+    return blended
+
+
+def sample_channels(
+    document: Document, binary: bytearray, clip: Document, tree: Skeleton, wanted: set[int]
+) -> tuple[Floats, dict[int, dict[str, Floats]]]:
+    """Return one timeline, the union of all key times, and the wanted nodes' tracks on it.
+
+    :raises RetargetError: when no channel moves a wanted node, or the timeline is too long.
+    """
+    samplers = entries(clip, "samplers")
+    picked: dict[tuple[int, str], Document] = {}
+    for channel in entries(clip, "channels"):
+        target = channel.get("target")
+        if not isinstance(target, dict):
+            raise GlbError("an animation channel has no target")
+        path = target.get("path")
+        if not isinstance(path, str) or path not in TRACK_TYPES or "node" not in target:
             continue
-        if times is None:
-            times = read_floats(document, binary, sampler["input"])[:, 0]
-        name = nodes[channel["target"]["node"]].get("name", "")
-        tracks[path][name] = read_floats(document, binary, sampler["output"])
-    if times is None:
-        raise RetargetError("the motion has no rotation or translation channels")
-    return times, tracks
+        node = index_into(target["node"], tree.nodes, "an animation channel")
+        if node in wanted:
+            sampler = index_into(channel.get("sampler"), samplers, "an animation channel")
+            picked.setdefault((node, path), samplers[sampler])
+    if not picked:
+        raise RetargetError("the motion does not animate its humanoid bones")
+    keys = {
+        key: read_track(document, binary, sampler, TRACK_TYPES[key[1]])
+        for key, sampler in picked.items()
+    }
+    timeline = numpy.unique(numpy.concatenate([times for times, _, _ in keys.values()]))
+    if len(timeline) > MAX_FRAMES:
+        raise RetargetError(f"the motion has more than {MAX_FRAMES} frames")
+    tracks: dict[int, dict[str, Floats]] = {}
+    for (node, path), (times, values, step) in keys.items():
+        tracks.setdefault(node, {})[path] = resample(
+            times, values, step, timeline, path == "rotation"
+        )
+    return timeline, tracks
+
+
+def animated_local(node: Document, tracks: dict[str, Floats], frames: int) -> Floats:
+    """Return a node's local matrix per frame, from its animated or its rest TRS.
+
+    :raises RetargetError: when a channel animates a node that has a matrix.
+    """
+    if "matrix" in node:
+        if tracks:
+            raise RetargetError("a motion animates a node that has a matrix")
+        return numpy.broadcast_to(local_matrix(node), (frames, 4, 4))
+    rotation = tracks.get("rotation", numbers(node, "rotation", IDENTITY))
+    return compose(
+        numpy.broadcast_to(unit(rotation), (frames, 4)),
+        numpy.broadcast_to(
+            tracks.get("translation", numbers(node, "translation", ORIGIN)), (frames, 3)
+        ),
+        numpy.broadcast_to(tracks.get("scale", numbers(node, "scale", UNIT_SCALE)), (frames, 3)),
+    )
 
 
 def read_motion(data: bytes) -> Motion:
@@ -259,164 +479,184 @@ def read_motion(data: bytes) -> Motion:
     :raises RetargetError: when it has no usable animation.
     """
     document, binary = read_glb(data)
-    if not document.get("animations"):
+    animations = entries(document, "animations")
+    if not animations:
         raise RetargetError("the motion has no animation")
-    times, tracks = _channels(document, binary, document["animations"][0])
-    frames = len(times)
-    nodes = document["nodes"]
-    parent_of = parents(document)
-    rest_rotation: dict[str, Floats] = {}
-    rest_position: dict[str, Floats] = {}
-    rotation: dict[str, Floats] = {}
-    position: dict[str, Floats] = {}
-    for index in topological(len(nodes), parent_of):
-        name = nodes[index].get("name", str(index))
-        local_rest = numpy.array(nodes[index].get("rotation", IDENTITY), dtype=numpy.float64)
-        local_offset = numpy.array(
-            nodes[index].get("translation", [0.0, 0.0, 0.0]), dtype=numpy.float64
-        )
-        local_rotation = tracks["rotation"].get(name, numpy.tile(local_rest, (frames, 1)))
-        local_position = tracks["translation"].get(name, numpy.tile(local_offset, (frames, 1)))
-        if index not in parent_of:
-            rest_rotation[name], rest_position[name] = local_rest, local_offset
-            rotation[name], position[name] = local_rotation, local_position
-            continue
-        parent = nodes[parent_of[index]].get("name", str(parent_of[index]))
-        rest_rotation[name] = quat_mul(rest_rotation[parent], local_rest)
-        rest_position[name] = rest_position[parent] + quat_rotate(
-            rest_rotation[parent], local_offset
-        )
-        rotation[name] = quat_mul(rotation[parent], local_rotation)
-        position[name] = position[parent] + quat_rotate(rotation[parent], local_position)
-    bones = {bone: name for name, bone in KIMODO.items() if name in rest_rotation}
-    if "hips" not in bones:
-        bones = {bone: name for name in rest_rotation if (bone := canonical(name))}
-    return Motion(times, rest_rotation, rest_position, rotation, position, bones)
+    tree = skeleton(document)
+    bones = bone_map(tree, range(len(tree.nodes)))
+    missing = MOTION_BONES - set(bones)
+    if missing:
+        raise RetargetError(f"the motion's skeleton lacks {sorted(missing)}")
+    wanted = {index for joint in bones.values() for index in tree.chain(joint)}
+    if len(wanted) > MAX_MOTION_NODES:
+        raise RetargetError(f"the motion's bones hang under more than {MAX_MOTION_NODES} nodes")
+    times, tracks = sample_channels(document, binary, animations[0], tree, wanted)
+    world: dict[int, Floats] = {}
+    for index in tree.order:
+        if index in wanted:
+            local = animated_local(tree.nodes[index], tracks.get(index, {}), len(times))
+            parent = tree.parent_of.get(index)
+            world[index] = local if parent is None else world[parent] @ local
+    return Motion(
+        times,
+        rest_rotation={bone: quat_from_matrix(tree.rest[index]) for bone, index in bones.items()},
+        rest_position={bone: tree.rest[index][:3, 3] for bone, index in bones.items()},
+        rotation={bone: quat_from_matrix(world[index]) for bone, index in bones.items()},
+        position={bone: world[index][:, :3, 3] for bone, index in bones.items()},
+    )
 
 
-def rig_bones(document: Document) -> tuple[dict[str, int], list[int]]:
-    """Return the character's humanoid bones by shared name, and all its joints.
+def rig_bones(document: Document, tree: Skeleton) -> dict[str, int]:
+    """Return the character's humanoid bones by shared name, from the joints of all its skins.
 
-    :raises RetargetError: when it has no skin or lacks the core humanoid bones.
+    :raises RetargetError: when it has no skin, too many joints or lacks the core humanoid bones.
     """
-    skins = document.get("skins") or []
+    skins = entries(document, "skins")
     if not skins:
         raise RetargetError("the character has no skin; rig it first")
-    joints = [int(joint) for joint in skins[0]["joints"]]
-    found: dict[str, int] = {}
-    for joint in joints:
-        bone = canonical(document["nodes"][joint].get("name", ""))
-        if bone and bone not in found:
-            found[bone] = joint
+    joints: set[int] = set()
+    for skin in skins:
+        listed = skin.get("joints")
+        if not isinstance(listed, list):
+            raise GlbError("a skin's joints are not a list")
+        joints.update(index_into(joint, tree.nodes, "a skin joint") for joint in listed)
+    if len(joints) > MAX_JOINTS:
+        raise RetargetError(f"the character has more than {MAX_JOINTS} joints")
+    found = bone_map(tree, sorted(joints))
     missing = REQUIRED_BONES - set(found)
     if missing:
         raise RetargetError(f"the character's skeleton lacks humanoid bones: {sorted(missing)}")
-    return found, joints
+    return found
 
 
-def facing_turn(motion: Motion, worlds: dict[int, Floats], bones: dict[str, int]) -> Floats:
+def facing_turn(motion: Motion, tree: Skeleton, bones: dict[str, int]) -> Floats:
     """Return the turn about the vertical axis that lines the source's hips up with the rig's."""
-    missing = {"upperleg_l", "upperleg_r"} - set(motion.bones)
-    if missing:
-        raise RetargetError(f"the motion's skeleton lacks {sorted(missing)}")
-    source = (
-        motion.rest_position[motion.bones["upperleg_l"]]
-        - motion.rest_position[motion.bones["upperleg_r"]]
-    )
-    target = worlds[bones["upperleg_l"]][:3, 3] - worlds[bones["upperleg_r"]][:3, 3]
+    source = motion.rest_position["upperleg_l"] - motion.rest_position["upperleg_r"]
+    target = tree.rest[bones["upperleg_l"]][:3, 3] - tree.rest[bones["upperleg_r"]][:3, 3]
     angle = numpy.arctan2(target[0], target[2]) - numpy.arctan2(source[0], source[2])
     return numpy.array([0.0, numpy.sin(angle / 2), 0.0, numpy.cos(angle / 2)])
 
 
-def hip_height(heights: Sequence[float], hips: float) -> float:
-    return hips - (min(heights) if heights else 0.0)
+def standing(hips: Floats, feet: Sequence[Floats]) -> tuple[float, float]:
+    """Return the ground under a rest skeleton, at its lowest foot, and the hips' height over it."""
+    ground = min(float(foot[1]) for foot in feet) if feet else 0.0
+    return ground, float(hips[1]) - ground
 
 
 def hip_track(
-    motion: Motion, document: Document, bones: dict[str, int], turn: Floats, in_place: bool
+    motion: Motion, tree: Skeleton, bones: dict[str, int], turn: Floats, in_place: bool
 ) -> Floats:
-    """Return the character's hip translation per frame: the source's hip travel, scaled."""
-    worlds = world_matrices(document)
-    hips = bones["hips"]
-    source_hips = motion.bones["hips"]
-    target_feet = [
-        float(worlds[bones[side]][1, 3]) for side in ("foot_l", "foot_r") if side in bones
-    ]
-    source_feet = [
-        float(motion.rest_position[motion.bones[side]][1])
-        for side in ("foot_l", "foot_r")
-        if side in motion.bones
-    ]
-    target_height = hip_height(target_feet, float(worlds[hips][1, 3]))
-    source_height = hip_height(source_feet, float(motion.rest_position[source_hips][1]))
+    """Return the character's local hip translation per frame.
+
+    The motion's ground is at height zero, so we keep its hip height above that ground; its
+    travel counts from the first frame. Both scale by the ratio of the standing hip heights.
+    """
+    hips = tree.rest[bones["hips"]][:3, 3]
+    ground, target_height = standing(hips, [tree.rest[bones[f]][:3, 3] for f in FEET if f in bones])
+    _, source_height = standing(
+        motion.rest_position["hips"],
+        [motion.rest_position[f] for f in FEET if f in motion.rest_position],
+    )
     if source_height <= 0 or target_height <= 0:
         raise RetargetError("could not measure the hip heights")
-    # Motion files may keep the rest hips at the origin, so travel counts from the first frame.
-    travel = motion.position[source_hips] - motion.position[source_hips][0]
+    scale = target_height / source_height
+    path = motion.position["hips"]
+    travel = path - path[0]
+    travel[:, 1] = 0.0
     if in_place:
         travel[:, [0, 2]] = 0.0
-    moved = quat_rotate(turn, travel) * (target_height / source_height)
-    parent = parents(document).get(hips)
-    parent_world = worlds[parent] if parent is not None else numpy.eye(4)
-    rest = local_matrix(document["nodes"][hips])[:3, 3]
-    track: Floats = rest + moved @ numpy.linalg.inv(parent_world[:3, :3]).T
-    return track
-
-
-def joint_rotations(
-    motion: Motion, document: Document, bones: dict[str, int], joints: list[int], turn: Floats
-) -> dict[int, Floats]:
-    """Return each joint's local rotation per frame that gives its bone the source's world turn."""
-    frames = len(motion.times)
-    nodes = document["nodes"]
-    parent_of = parents(document)
-    worlds = world_matrices(document)
-    bone_of = {joint: bone for bone, joint in bones.items()}
-    joint_set = set(joints)
-    world: dict[int, Floats] = {}
-    local: dict[int, Floats] = {}
-    for joint in topological(len(nodes), parent_of):
-        if joint not in joint_set:
-            continue
-        parent = parent_of.get(joint)
-        parent_rotation = world.get(parent) if parent is not None else None
-        if parent_rotation is None:
-            base = quat_from_matrix(worlds[parent]) if parent is not None else IDENTITY
-            parent_rotation = numpy.tile(base, (frames, 1))
-        source = motion.bones.get(bone_of.get(joint, ""))
-        if source is None:
-            rest_local = quat_from_matrix(local_matrix(nodes[joint]))
-            world[joint] = quat_mul(parent_rotation, numpy.tile(rest_local, (frames, 1)))
-        else:
-            delta = quat_mul(motion.rotation[source], quat_inv(motion.rest_rotation[source]))
-            delta = quat_mul(quat_mul(turn, delta), quat_inv(turn))
-            world[joint] = quat_mul(delta, quat_from_matrix(worlds[joint]))
-        rotation = quat_mul(quat_inv(parent_rotation), world[joint])
-        local[joint] = rotation / numpy.linalg.norm(rotation, axis=-1, keepdims=True)
+    world = hips + quat_rotate(turn, travel) * scale
+    world[:, 1] = ground + path[:, 1] * scale
+    parent = tree.parent_of.get(bones["hips"])
+    parent_world = tree.rest[parent] if parent is not None else numpy.eye(4)
+    if abs(numpy.linalg.det(parent_world)) < TINY:
+        raise RetargetError("the hips hang under a node with zero scale")
+    points = numpy.column_stack([world, numpy.ones(len(world))])
+    local: Floats = (points @ numpy.linalg.inv(parent_world).T)[:, :3]
     return local
 
 
+def parent_rotation(tree: Skeleton, joint: int, world: dict[int, Floats]) -> Floats:
+    """Return a joint's parent world rotation per frame.
+
+    That is its nearest animated ancestor's, carried through the still nodes in between.
+    """
+    ancestors = tree.chain(joint)[1:]
+    if not ancestors:
+        return IDENTITY
+    rest = quat_from_matrix(tree.rest[ancestors[0]])
+    animated = next((index for index in ancestors if index in world), None)
+    if animated is None:
+        return rest
+    between = quat_mul(quat_inv(quat_from_matrix(tree.rest[animated])), rest)
+    return quat_mul(world[animated], between)
+
+
+def joint_rotations(
+    motion: Motion, tree: Skeleton, bones: dict[str, int], turn: Floats
+) -> dict[int, Floats]:
+    """Return each mapped joint's local rotation per frame that gives it the source's world turn."""
+    mapped = {joint: bone for bone, joint in bones.items() if bone in motion.rotation}
+    world: dict[int, Floats] = {}
+    local: dict[int, Floats] = {}
+    for joint in tree.order:
+        bone = mapped.get(joint)
+        if bone is None:
+            continue
+        delta = quat_mul(motion.rotation[bone], quat_inv(motion.rest_rotation[bone]))
+        delta = quat_mul(quat_mul(turn, delta), quat_inv(turn))
+        world[joint] = quat_mul(delta, quat_from_matrix(tree.rest[joint]))
+        local[joint] = unit(quat_mul(quat_inv(parent_rotation(tree, joint, world)), world[joint]))
+    return local
+
+
+def append_floats(document: Document, binary: bytearray, values: Floats, kind: str) -> int:
+    data = numpy.ascontiguousarray(values, dtype=numpy.float32)
+    binary.extend(b"\0" * (-len(binary) % 4))
+    views = entries(document, "bufferViews")
+    views.append({"buffer": 0, "byteOffset": len(binary), "byteLength": data.nbytes})
+    document["bufferViews"] = views
+    binary.extend(data.tobytes())
+    spec: Document = {
+        "bufferView": len(views) - 1,
+        "componentType": FLOAT,
+        "count": len(data),
+        "type": kind,
+    }
+    if kind == "SCALAR":
+        spec["min"], spec["max"] = [float(data.min())], [float(data.max())]
+    accessors = entries(document, "accessors")
+    accessors.append(spec)
+    document["accessors"] = accessors
+    return len(accessors) - 1
+
+
 def add_clip(
-    document: Document, binary: bytearray, motion: Motion, name: str, in_place: bool
+    document: Document,
+    binary: bytearray,
+    rig: tuple[Skeleton, dict[str, int]],
+    motion: Motion,
+    name: str,
+    in_place: bool,
 ) -> None:
     """Retarget one motion onto the character and add it as an animation named `name`."""
-    bones, joints = rig_bones(document)
-    turn = facing_turn(motion, world_matrices(document), bones)
+    tree, bones = rig
+    turn = facing_turn(motion, tree, bones)
     times = append_floats(document, binary, motion.times, "SCALAR")
-    samplers: list[dict[str, Any]] = []
-    channels: list[dict[str, Any]] = []
+    samplers: list[Document] = []
+    channels: list[Document] = []
 
     def track(node: int, path: str, values: Floats, kind: str) -> None:
         output = append_floats(document, binary, values, kind)
         samplers.append({"input": times, "interpolation": "LINEAR", "output": output})
         channels.append({"sampler": len(samplers) - 1, "target": {"node": node, "path": path}})
 
-    for joint, rotation in joint_rotations(motion, document, bones, joints, turn).items():
+    for joint, rotation in joint_rotations(motion, tree, bones, turn).items():
         track(joint, "rotation", rotation, "VEC4")
-    track(bones["hips"], "translation", hip_track(motion, document, bones, turn, in_place), "VEC3")
-    document.setdefault("animations", []).append(
-        {"name": name, "channels": channels, "samplers": samplers}
-    )
+    track(bones["hips"], "translation", hip_track(motion, tree, bones, turn, in_place), "VEC3")
+    animations = entries(document, "animations")
+    animations.append({"name": name, "channels": channels, "samplers": samplers})
+    document["animations"] = animations
 
 
 def retarget(
@@ -428,10 +668,12 @@ def retarget(
     :raises RetargetError: when the character or a motion cannot be matched up.
     """
     document, binary = read_glb(character)
-    buffers = document.get("buffers") or []
-    if len(buffers) != 1 or "uri" in buffers[0]:
-        raise RetargetError("the character must be a GLB with one embedded buffer")
+    buffers = entries(document, "buffers")
+    if not buffers or "uri" in buffers[0]:
+        raise RetargetError("the character must keep its data inside the GLB")
+    tree = skeleton(document)
+    rig = (tree, rig_bones(document, tree))
     for name, data in motions:
-        add_clip(document, binary, read_motion(data), name, in_place)
+        add_clip(document, binary, rig, read_motion(data), name, in_place)
     buffers[0]["byteLength"] = len(binary) + (-len(binary) % 4)
     return write_glb(document, binary)

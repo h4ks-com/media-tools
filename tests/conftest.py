@@ -1,10 +1,15 @@
 import copy
 import io
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
+from media_tools.glb import CHUNK
+from media_tools.glb import GLB_MAGIC
+from media_tools.glb import HEADER
+from media_tools.glb import JSON_CHUNK
 from media_tools.glb import Document
 from media_tools.glb import read_glb
 from media_tools.glb import write_glb
@@ -43,6 +48,26 @@ def jump() -> bytes:
     return (DATA / "jump.glb").read_bytes()
 
 
+def glb_with_json(text: bytes) -> bytes:
+    """Return a GLB whose JSON chunk holds exactly `text`, parsable or not."""
+    text += b" " * (-len(text) % 4)
+    chunks = CHUNK.pack(len(text), JSON_CHUNK) + text
+    return HEADER.pack(GLB_MAGIC, 2, HEADER.size + len(chunks)) + chunks
+
+
+def edit(glb: bytes, change: Callable[[Document, bytearray], object]) -> bytes:
+    """Return the GLB after `change` edits its document and binary buffer in place."""
+    document, binary = read_glb(glb)
+    change(document, binary)
+    return write_glb(document, binary)
+
+
+def add_root(document: Document, root: Document) -> None:
+    """Make a new `root` node the parent of the whole skeleton."""
+    document["nodes"].append({**root, "children": [0]})
+    document["scenes"][0]["nodes"] = [len(document["nodes"]) - 1]
+
+
 def vroid_rig(motion: bytes, root: Document | None = None) -> bytes:
     """Return Kimodo's skeleton renamed to VRoid bones and skinned, as a stand-in rigged character.
 
@@ -56,8 +81,7 @@ def vroid_rig(motion: bytes, root: Document | None = None) -> bytes:
     rig["skins"] = [{"joints": list(range(len(rig["nodes"])))}]
     rig.pop("animations")
     if root is not None:
-        rig["nodes"].append({**root, "children": [0]})
-        rig["scenes"][0]["nodes"] = [len(rig["nodes"]) - 1]
+        add_root(rig, root)
     return write_glb(rig, binary)
 
 

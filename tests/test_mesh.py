@@ -46,6 +46,36 @@ def test_simplify_runs_gltfpack_and_makes_the_result_opaque(tmp_path: Path) -> N
     assert document["materials"][0]["alphaMode"] == "OPAQUE"
 
 
+def test_small_ratios_reach_gltfpack_unrounded(tmp_path: Path) -> None:
+    gltfpack = fake_gltfpack(tmp_path, f'echo "$@" > {tmp_path}/args; cp "$2" "$4"')
+    huge = {**TRIANGLES, "accessors": [{"count": 3_000_000}, {"count": 12}]}
+
+    mesh.simplify(write_glb(huge, b""), 7, gltfpack, 10)
+
+    assert "-si 0.00000700 " in (tmp_path / "args").read_text()
+
+
+def test_outside_files_are_refused_before_gltfpack_runs(tmp_path: Path) -> None:
+    peeking = {**TRIANGLES, "images": [{"uri": "../../etc/passwd"}]}
+
+    with pytest.raises(GlbError, match="embed"):
+        mesh.simplify(write_glb(peeking, b""), 7, str(tmp_path / "no-gltfpack"), 10)
+
+
+@pytest.mark.parametrize(
+    "document",
+    [
+        {"accessors": [{"count": "30"}], "meshes": [{"primitives": [{"indices": 0}]}]},
+        {"accessors": [{"count": 30}], "meshes": [{"primitives": [{"indices": 3}]}]},
+        {"meshes": [{"primitives": [{"attributes": [1]}]}]},
+        {"meshes": {"primitives": []}},
+    ],
+)
+def test_a_malformed_mesh_is_refused(document: dict[str, object]) -> None:
+    with pytest.raises(GlbError):
+        mesh.triangle_count(write_glb(document, b""))
+
+
 def test_a_failing_gltfpack_reports_its_error(tmp_path: Path) -> None:
     gltfpack = fake_gltfpack(tmp_path, "echo broken mesh >&2; exit 1")
 

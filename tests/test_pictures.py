@@ -49,6 +49,52 @@ def test_a_frame_without_a_character_is_refused() -> None:
         pictures.sprite_frames([png((100, 100)), png((100, 100))], 32, 8)
 
 
+def encoded(picture: Image.Image, fmt: str, **options: object) -> bytes:
+    output = io.BytesIO()
+    picture.save(output, format=fmt, **options)
+    return output.getvalue()
+
+
+def test_pictures_over_the_pixel_cap_are_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pictures, "MAX_PIXELS", 99)
+
+    with pytest.raises(pictures.PictureError, match="more than 99 pixels"):
+        pictures.pixel_art(png((10, 10)), 8, 4, 1)
+
+
+def test_sprite_frames_over_the_total_pixel_cap_are_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pictures, "MAX_SPRITE_PIXELS", 15_000)
+    frames = [png((100, 100), (30, 20, 50, 80))] * 2
+
+    with pytest.raises(pictures.PictureError, match="together"):
+        pictures.sprite_frames(frames, 32, 8)
+
+
+@pytest.mark.parametrize("fmt", ["BMP", "GIF", "TIFF"])
+def test_only_png_jpeg_and_webp_are_read(fmt: str) -> None:
+    with pytest.raises(pictures.PictureError, match="PNG, JPEG or WebP"):
+        pictures.pixel_art(encoded(Image.new("RGB", (10, 10)), fmt), 8, 4, 1)
+
+
+def test_a_truncated_picture_is_refused() -> None:
+    whole = encoded(Image.effect_noise((64, 64), 50).convert("RGB"), "PNG")
+
+    with pytest.raises(pictures.PictureError, match="broken"):
+        pictures.pixel_art(whole[: len(whole) // 2], 8, 4, 1)
+
+
+def test_pictures_turn_upright_as_their_exif_says() -> None:
+    exif = Image.Exif()
+    exif[0x0112] = 6
+    sideways = encoded(Image.new("RGB", (40, 20), "white"), "JPEG", exif=exif)
+
+    art = Image.open(io.BytesIO(pictures.pixel_art(sideways, 20, 4, 1)))
+
+    assert art.size == (10, 20)
+
+
 @pytest.mark.parametrize("move", sorted(poses.MOVES))
 def test_every_move_draws_every_frame(move: str) -> None:
     for frame in range(6):
