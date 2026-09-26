@@ -10,6 +10,8 @@ import re
 from collections.abc import Iterable
 from collections.abc import Sequence
 from dataclasses import dataclass
+from graphlib import CycleError
+from graphlib import TopologicalSorter
 
 import numpy
 from numpy.typing import NDArray
@@ -239,7 +241,10 @@ def numbers(node: Document, key: str, default: Floats) -> Floats:
         or not all(isinstance(item, int | float) and not isinstance(item, bool) for item in value)
     ):
         raise GlbError(f"a node's {key} is not {len(default)} numbers")
-    array = numpy.array(value, dtype=numpy.float64)
+    try:
+        array = numpy.array(value, dtype=numpy.float64)
+    except OverflowError as error:
+        raise GlbError(f"a node's {key} is not finite") from error
     if not numpy.isfinite(array).all():
         raise GlbError(f"a node's {key} is not finite")
     return array
@@ -261,19 +266,11 @@ def parents_first(count: int, parent_of: dict[int, int]) -> list[int]:
 
     :raises GlbError: when the nodes form a loop.
     """
-    order: list[int] = []
-    placed: set[int] = set()
-    for start in range(count):
-        chain: list[int] = []
-        index: int | None = start
-        while index is not None and index not in placed:
-            if index in chain:
-                raise GlbError("the nodes form a loop")
-            chain.append(index)
-            index = parent_of.get(index)
-        order.extend(reversed(chain))
-        placed.update(chain)
-    return order
+    graph = {index: [parent_of[index]] if index in parent_of else [] for index in range(count)}
+    try:
+        return list(TopologicalSorter(graph).static_order())
+    except CycleError as error:
+        raise GlbError("the nodes form a loop") from error
 
 
 def skeleton(document: Document) -> Skeleton:

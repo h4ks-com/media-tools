@@ -1,4 +1,6 @@
 import io
+import struct
+import zlib
 from collections.abc import Callable
 
 import numpy
@@ -254,15 +256,20 @@ def numbered_node(walk: bytes) -> bytes:
     return edit(walk, spoil)
 
 
-@pytest.mark.parametrize("spoil", [bad_json, far_accessor, short_sampler, numbered_node])
-def test_broken_motions_are_a_422_never_a_500(walk: bytes, spoil: Callable[[bytes], bytes]) -> None:
+@pytest.mark.parametrize(
+    ("spoil", "status"),
+    [(bad_json, 400), (far_accessor, 400), (numbered_node, 400), (short_sampler, 422)],
+)
+def test_broken_motions_are_refused_never_a_500(
+    walk: bytes, spoil: Callable[[bytes], bytes], status: int
+) -> None:
     character, motion = vroid_rig(walk), spoil(walk)
 
     response = lenient.post(
         f"/retarget?lengths={len(character)},{len(motion)}&names=Walk", content=character + motion
     )
 
-    assert response.status_code == 422
+    assert response.status_code == status
 
 
 def test_a_broken_mesh_is_a_400_never_a_500() -> None:
@@ -273,6 +280,43 @@ def test_a_broken_mesh_is_a_400_never_a_500() -> None:
 def test_a_truncated_picture_is_a_400_never_a_500(path: str) -> None:
     whole = png((64, 64), (10, 10, 50, 50))
     frames = [whole[:-40], whole[:-40]] if path == "/sprite-frames" else [whole[:-40]]
+    joiner = "&" if "?" in path else "?"
+    lengths = ",".join(str(len(frame)) for frame in frames)
+
+    response = lenient.post(f"{path}{joiner}lengths={lengths}", content=b"".join(frames))
+
+    assert response.status_code == 400
+
+
+def test_a_huge_node_number_is_a_400_never_a_500(walk: bytes) -> None:
+    def spoil(document: Document, _: bytearray) -> None:
+        document["nodes"][0]["translation"] = [10**400, 0, 0]
+
+    character = edit(vroid_rig(walk), spoil)
+
+    response = lenient.post(
+        f"/retarget?lengths={len(character)},{len(walk)}&names=Walk", content=character + walk
+    )
+
+    assert response.status_code == 400
+
+
+def with_broken_exif(picture: bytes) -> bytes:
+    """Return the PNG with an unreadable eXIf chunk right after its IHDR chunk."""
+    body = b"X" * 16
+    chunk = (
+        struct.pack(">I", len(body))
+        + b"eXIf"
+        + body
+        + struct.pack(">I", zlib.crc32(b"eXIf" + body))
+    )
+    return picture[:33] + chunk + picture[33:]
+
+
+@pytest.mark.parametrize("path", ["/pixelate", "/cutout?method=key", "/sprite-frames"])
+def test_broken_exif_is_a_400_never_a_500(path: str) -> None:
+    picture = with_broken_exif(png((64, 64), (10, 10, 50, 50)))
+    frames = [picture, picture] if path == "/sprite-frames" else [picture]
     joiner = "&" if "?" in path else "?"
     lengths = ",".join(str(len(frame)) for frame in frames)
 

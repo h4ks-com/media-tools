@@ -204,6 +204,8 @@ async def retarget_motions(
         motions = list(zip(clip_names, parts[1:], strict=True))
         try:
             glb = await run_in_threadpool(in_slot, lambda: retarget(parts[0], motions, in_place))
-        except (GlbError, RetargetError) as error:
+        except GlbError as error:
+            raise HTTPException(400, f"not a usable GLB: {error}") from error
+        except RetargetError as error:
             raise HTTPException(422, f"cannot retarget: {error}") from error
     return named_file(glb, "model.glb")

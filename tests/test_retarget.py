@@ -20,6 +20,7 @@ from media_tools.retarget import Motion
 from media_tools.retarget import RetargetError
 from media_tools.retarget import append_floats
 from media_tools.retarget import canonical
+from media_tools.retarget import parents_first
 from media_tools.retarget import quat_from_matrix
 from media_tools.retarget import quat_mul
 from media_tools.retarget import quat_rotate
@@ -453,3 +454,12 @@ def test_nodes_that_form_a_loop_are_refused(walk: bytes) -> None:
 
     with pytest.raises(GlbError, match="loop"):
         read_motion(edit(walk, spoil))
+
+
+def test_parents_come_before_their_children() -> None:
+    parent_of = {0: 3, 1: 0, 2: 1, 4: 3}
+
+    order = parents_first(5, parent_of)
+
+    assert sorted(order) == [0, 1, 2, 3, 4]
+    assert all(order.index(parent) < order.index(child) for child, parent in parent_of.items())

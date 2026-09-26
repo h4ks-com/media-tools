@@ -55,7 +55,11 @@ def open_picture(data: bytes) -> Image.Image:
         picture.load()
     except (OSError, Image.DecompressionBombError) as error:
         raise PictureError(f"the picture is broken: {error}") from error
-    return ImageOps.exif_transpose(picture)
+    # We catch SyntaxError because Pillow raises it for a malformed EXIF block.
+    try:
+        return ImageOps.exif_transpose(picture)
+    except SyntaxError as error:
+        raise PictureError(f"the picture's EXIF is broken: {error}") from error
 
 
 def png_bytes(picture: Image.Image) -> bytes:
