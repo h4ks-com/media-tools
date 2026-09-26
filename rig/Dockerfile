@@ -1,7 +1,6 @@
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
 
-# HF_HUB_OFFLINE/TRANSFORMERS_OFFLINE come later: baking the weights below needs
-# network, and the pod itself never gets any.
+# The pod mounts the UniRig and opt-350m Hugging Face cache read-only at HF_HOME and has no network.
 ENV DEBIAN_FRONTEND=noninteractive \
     PYOPENGL_PLATFORM=osmesa \
     HF_HOME=/opt/unirig/hf-cache \
@@ -59,23 +58,6 @@ ADD --checksum=sha256:ebc236f5f6c08c7e5c5750476a187d24805d44d8c680449c4b7369c333
 RUN python -m zipfile -e /tmp/gltfpack.zip /opt/tools \
     && chmod 0755 /opt/tools/gltfpack \
     && rm /tmp/gltfpack.zip
-
-# Bakes the two checkpoints generate_skeleton.sh/generate_skin.sh load, plus the
-# tiny facebook/opt-350m config the skeleton model's architecture is built from, so
-# the pod needs no network at request time.
-# download() (src/inference/download.py) and AutoConfig.from_pretrained() both resolve
-# the unpinned "main" ref at request time; the mkdir/printf below point it at the same
-# pinned commit so that offline lookup finds it with no network call.
-RUN python -c "\
-from huggingface_hub import hf_hub_download; \
-SKEL_REV = '36842e2b5947e9e60f89275b83208c8e74071c63'; \
-OPT_REV = '08ab08cc4b72ff5593870b5d527cf4230323703c'; \
-hf_hub_download(repo_id='VAST-AI/UniRig', filename='skeleton/articulation-xl_quantization_256/model.ckpt', revision=SKEL_REV); \
-hf_hub_download(repo_id='VAST-AI/UniRig', filename='skin/articulation-xl/model.ckpt', revision=SKEL_REV); \
-hf_hub_download(repo_id='facebook/opt-350m', filename='config.json', revision=OPT_REV)" \
-    && mkdir -p $HF_HOME/hub/models--VAST-AI--UniRig/refs $HF_HOME/hub/models--facebook--opt-350m/refs \
-    && printf '%s' 36842e2b5947e9e60f89275b83208c8e74071c63 > $HF_HOME/hub/models--VAST-AI--UniRig/refs/main \
-    && printf '%s' 08ab08cc4b72ff5593870b5d527cf4230323703c > $HF_HOME/hub/models--facebook--opt-350m/refs/main
 
 ENV HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1
