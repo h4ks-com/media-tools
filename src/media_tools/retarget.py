@@ -54,9 +54,9 @@ TINY = 1e-9
 # Blender-style names) to one vocabulary; Kimodo's SOMA skeleton has its own table below.
 BONE_ALIASES = {
     "hips": {"hips", "pelvis"},
-    "spine": {"spine"},
-    "chest": {"chest", "spine1"},
-    "upperchest": {"upperchest", "spine2"},
+    "spine": {"spine", "spine.001"},
+    "chest": {"chest", "spine1", "spine.002"},
+    "upperchest": {"upperchest", "spine2", "spine.003"},
     "neck": {"neck"},
     "head": {"head"},
     "shoulder": {"shoulder", "clavicle"},
