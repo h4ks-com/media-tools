@@ -45,9 +45,12 @@ RUN pip install transformers==4.51.3 python-box einops omegaconf pytorch_lightni
     && pip install PyOpenGL==3.1.7 \
     && pip install fastapi==0.141.1 "uvicorn[standard]==0.53.0"
 
+# pip requires a wheel's own filename, not just its contents, to match its naming
+# convention, so this keeps the upstream filename instead of renaming it.
 ADD --checksum=sha256:1c455db7a1e5d58e9d43370ecfc75a3a2eb1e37ec12353db66d12c23dbbc3ac6 \
-    https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post1/flash_attn-2.8.3.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl /tmp/flash_attn.whl
-RUN pip install /tmp/flash_attn.whl && rm /tmp/flash_attn.whl
+    https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.3.post1/flash_attn-2.8.3.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl /tmp/
+RUN pip install /tmp/flash_attn-2.8.3.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl \
+    && rm /tmp/flash_attn-2.8.3.post1+cu12torch2.5cxx11abiFALSE-cp311-cp311-linux_x86_64.whl
 
 # Same pinned gltfpack as the main image, used here to strip EXT_meshopt_compression
 # before handing a mesh to bpy, which can't read it.
