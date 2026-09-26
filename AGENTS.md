@@ -12,6 +12,7 @@ media-tools is an internal HTTP service the h4ks n8n workflows call inside the c
 - `mesh.py`: gltfpack simplification and opaque materials.
 - `retarget.py`: moves skeleton animations (Kimodo SOMA or a humanoid rig) onto a rigged humanoid GLB as named clips.
 - `glb.py`: reading and writing binary glTF.
+- `library/`: Quaternius's Universal Animation Library (CC0), one skeleton GLB per clip, which `/retarget` adds by the keys `GET /library` lists. `scripts/split_animation_library.py` writes it from the library's glTF.
 - `tests/` mirrors the modules; `tests/data` holds two Kimodo motions and a skinned character as gltfpack writes it.
 
 ## Commands (Makefile is SSoT)

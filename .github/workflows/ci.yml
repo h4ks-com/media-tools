@@ -96,6 +96,8 @@ jobs:
           for path, body in (("/cutout?method=isnet", picture.getvalue()), ("/mesh?triangles=1000", model)):
               with urllib.request.urlopen(urllib.request.Request(BASE + path, data=body), timeout=600) as response:
                   print(path, response.status)
+          with urllib.request.urlopen(f"{BASE}/library", timeout=10) as response:
+              assert b"Jog_Fwd_Loop" in response.read()
           EOF
       - if: failure()
         run: docker logs smoke

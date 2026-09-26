@@ -9,6 +9,7 @@ import threading
 from collections.abc import Callable
 from collections.abc import Iterator
 from contextlib import contextmanager
+from pathlib import Path
 from typing import Annotated
 
 from fastapi import FastAPI
@@ -35,6 +36,30 @@ GLTFPACK = os.environ.get("GLTFPACK", "/opt/tools/gltfpack")
 TIMEOUT_SECONDS = float(os.environ.get("TIMEOUT_SECONDS", "600"))
 MAX_IN_FLIGHT = 4
 MEDIA_TYPES = {"png": "image/png", "gif": "image/gif", "glb": "model/gltf-binary"}
+LIBRARY = {path.stem: path for path in sorted((Path(__file__).parent / "library").glob("*.glb"))}
+FRIENDLY_NAMES = {
+    "Idle_Loop": "Idle",
+    "Walk_Loop": "Walk",
+    "Jog_Fwd_Loop": "Run",
+    "Sprint_Loop": "Sprint",
+    "Jump_Start": "Jump Start",
+    "Jump_Loop": "Jump Air",
+    "Jump_Land": "Jump Land",
+    "Punch_Jab": "Punch",
+    "Punch_Cross": "Cross Punch",
+    "Sword_Attack": "Sword Attack",
+    "Hit_Chest": "Hit",
+    "Death01": "Death",
+    "Roll": "Roll",
+    "Dance_Loop": "Dance",
+    "Crouch_Idle_Loop": "Crouch",
+    "Crouch_Fwd_Loop": "Crouch Walk",
+    "Sitting_Idle_Loop": "Sit",
+    "Swim_Fwd_Loop": "Swim",
+    "Push_Loop": "Push",
+    "PickUp_Table": "Pick Up",
+    "Interact": "Interact",
+}
 
 cutter = pictures.Cutter(os.environ.get("CUTOUT_MODEL", "/opt/tools/isnet-general-use.onnx"))
 # We run one heavy job at a time, since a cutout or a big mesh can take gigabytes.
@@ -187,21 +212,33 @@ async def simplify_mesh(
     return named_file(glb, "model.glb")
 
 
+@app.get("/library")
+async def library_clips() -> list[dict[str, str]]:
+    return [{"key": key, "name": FRIENDLY_NAMES.get(key, key)} for key in LIBRARY]
+
+
 @app.post("/retarget")
 async def retarget_motions(
-    request: Request, lengths: str, names: str, in_place: bool = True
+    request: Request, lengths: str, names: str = "", library: str = "", in_place: bool = True
 ) -> Response:
+    picked = [key.strip() for key in library.split(",") if key.strip()]
+    if any(key not in LIBRARY for key in picked):
+        raise HTTPException(400, "library takes clip keys that GET /library lists")
     with heavy_turn():
         body = await read_body(request, MAX_MODEL_BYTES + MAX_CLIPS * MAX_MOTION_BYTES)
-        parts = split_body(body, lengths, range(2, MAX_CLIPS + 2))
-        clip_names = [name.strip() for name in names.split(",")]
+        parts = split_body(body, lengths, range(1, MAX_CLIPS + 2))
+        clip_names = [name.strip() for name in names.split(",")] if names else []
         if len(clip_names) != len(parts) - 1 or not all(clip_names):
             raise HTTPException(400, "give one clip name per motion in names")
+        if not 0 < len(clip_names) + len(picked) <= MAX_CLIPS:
+            raise HTTPException(400, f"ask for 1 to {MAX_CLIPS} clips from motions and library")
         if len(parts[0]) > MAX_MODEL_BYTES or any(
             len(part) > MAX_MOTION_BYTES for part in parts[1:]
         ):
             raise HTTPException(400, "the character or a motion is too large")
-        motions = list(zip(clip_names, parts[1:], strict=True))
+        motions = list(zip(clip_names, parts[1:], strict=True)) + [
+            (FRIENDLY_NAMES.get(key, key), LIBRARY[key].read_bytes()) for key in picked
+        ]
         try:
             glb = await run_in_threadpool(in_slot, lambda: retarget(parts[0], motions, in_place))
         except GlbError as error:

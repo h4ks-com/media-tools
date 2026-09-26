@@ -146,6 +146,48 @@ def test_retarget_adds_named_clips(walk: bytes, jump: bytes) -> None:
     assert [clip["name"] for clip in read_glb(body)[0]["animations"]] == ["Walk", "Jump"]
 
 
+def test_library_lists_every_clip_with_its_friendly_name() -> None:
+    clips = client.get("/library").json()
+
+    assert {"key": "Jog_Fwd_Loop", "name": "Run"} in clips
+    assert {"key": "Pistol_Aim_Up", "name": "Pistol_Aim_Up"} in clips
+    assert set(app_module.FRIENDLY_NAMES) <= {clip["key"] for clip in clips}
+
+
+@pytest.mark.parametrize(
+    ("names", "library", "clips"),
+    [
+        ("", "Idle_Loop,Jog_Fwd_Loop", ["Idle", "Run"]),
+        ("Walk", "Pistol_Aim_Up", ["Walk", "Pistol_Aim_Up"]),
+    ],
+)
+def test_retarget_adds_library_clips(
+    walk: bytes, names: str, library: str, clips: list[str]
+) -> None:
+    character = vroid_rig(walk)
+    motions = [walk] if names else []
+    lengths = ",".join(str(len(part)) for part in [character, *motions])
+
+    status, body = post(
+        f"/retarget?lengths={lengths}&names={names}&library={library}",
+        b"".join([character, *motions]),
+    )
+
+    assert status == 200
+    assert [clip["name"] for clip in read_glb(body)[0]["animations"]] == clips
+
+
+@pytest.mark.parametrize(
+    "library", ["Nope", "../app", "Idle_Loop,Nope", "", ",".join(["Idle_Loop"] * 9)]
+)
+def test_retarget_refuses_unknown_or_too_many_library_clips(walk: bytes, library: str) -> None:
+    character = vroid_rig(walk)
+
+    status, _ = post(f"/retarget?lengths={len(character)}&library={library}", character)
+
+    assert status == 400
+
+
 def test_retarget_needs_one_name_per_motion(walk: bytes) -> None:
     character = vroid_rig(walk)
 

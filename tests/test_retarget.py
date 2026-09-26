@@ -8,6 +8,7 @@ from conftest import VROID
 from conftest import add_root
 from conftest import edit
 from conftest import vroid_rig
+from media_tools.app import LIBRARY
 from media_tools.glb import Document
 from media_tools.glb import GlbError
 from media_tools.glb import read_glb
@@ -27,6 +28,8 @@ from media_tools.retarget import quat_rotate
 from media_tools.retarget import read_floats
 from media_tools.retarget import read_motion
 from media_tools.retarget import retarget
+from media_tools.retarget import rig_bones
+from media_tools.retarget import skeleton
 
 TURNED = {"name": "Armature", "rotation": [0, 1, 0, 0], "scale": [2, 2, 2]}
 STILL = numpy.array([0, 0, 0, 1.0])
@@ -141,6 +144,11 @@ def lowest_foot(motion: Motion) -> float:
         ("mixamorig:RightForeArm", "lowerarm_r"),
         ("mixamorig:Spine2", "upperchest"),
         ("thigh.L", "upperleg_l"),
+        ("DEF-spine.001", "spine"),
+        ("DEF-spine.002", "chest"),
+        ("DEF-spine.003", "upperchest"),
+        ("DEF-upper_arm.L", "upperarm_l"),
+        ("DEF-f_index.01.L", None),
         ("J_Bip_L_Thumb1", None),
         ("Hand", None),
         ("Jaw", None),
@@ -184,6 +192,55 @@ def test_in_place_clips_keep_the_feet_on_the_ground_and_the_hips_on_the_spot(
     assert abs(lowest_foot(result) - rest_feet) < 0.03
     assert numpy.abs(hips[:, [0, 2]] - hips[0, [0, 2]]).max() < 1e-6
     assert numpy.ptp(hips[:, 1]) > 0.01
+
+
+def seam(motion: Motion) -> tuple[float, float]:
+    """Return how far the last frame's bone turns and hip spot are from the first frame's."""
+    angle = max(
+        float(numpy.degrees(2 * numpy.arccos(min(1.0, abs(float(turns[0] @ turns[-1]))))))
+        for turns in motion.rotation.values()
+    )
+    hips = motion.position["hips"]
+    return angle, float(numpy.linalg.norm(hips[-1] - hips[0]))
+
+
+@pytest.mark.parametrize("key", sorted(LIBRARY))
+def test_every_library_clip_moves_every_humanoid_bone_of_both_characters(
+    key: str, walk: bytes
+) -> None:
+    motion = LIBRARY[key].read_bytes()
+    packed = make_opaque((DATA / "packed-character.glb").read_bytes())
+
+    for character in (vroid_rig(walk), packed):
+        document, _ = read_glb(retarget(character, [(key, motion)]))
+
+        bones = rig_bones(document, skeleton(document))
+        channels = document["animations"][-1]["channels"]
+        assert len([c for c in channels if c["target"]["path"] == "rotation"]) == len(bones)
+
+
+@pytest.mark.parametrize("key", ["Idle_Loop", "Walk_Loop", "Jog_Fwd_Loop"])
+def test_in_place_library_clips_keep_the_feet_on_the_ground_and_the_hips_on_the_spot(
+    key: str, walk: bytes
+) -> None:
+    rest_feet = min(read_motion(walk).rest_position[foot][1] for foot in FEET)
+
+    result = read_motion(clip(retarget(vroid_rig(walk), [(key, LIBRARY[key].read_bytes())]), 0))
+
+    hips = result.position["hips"]
+    assert abs(lowest_foot(result) - rest_feet) < 0.03
+    assert numpy.abs(hips[:, [0, 2]] - hips[0, [0, 2]]).max() < 1e-6
+
+
+@pytest.mark.parametrize("key", [key for key in sorted(LIBRARY) if key.endswith("_Loop")])
+def test_library_loops_stay_loops(key: str, walk: bytes) -> None:
+    motion = LIBRARY[key].read_bytes()
+    source_angle, source_distance = seam(read_motion(motion))
+
+    angle, distance = seam(read_motion(clip(retarget(vroid_rig(walk), [(key, motion)]), 0)))
+
+    assert angle < source_angle + 0.01
+    assert distance < 2 * source_distance + 1e-5
 
 
 def arms_down(document: Document, _: bytearray) -> None:
