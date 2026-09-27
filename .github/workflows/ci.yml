@@ -162,6 +162,7 @@ jobs:
           version: v0.74.0
           image-ref: ${{ steps.meta.outputs.tags }}
           scanners: vuln
+          timeout: 15m0s
           format: json
           output: rig-trivy.json
       - name: Scan its base image
@@ -171,6 +172,7 @@ jobs:
           skip-setup-trivy: true
           image-ref: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
           scanners: vuln
+          timeout: 15m0s
           format: json
           output: base-trivy.json
       # We fail on fixable criticals in what we install and report the ones the base brings
