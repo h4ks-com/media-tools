@@ -161,7 +161,9 @@ def test_library_lists_every_clip_with_its_friendly_name() -> None:
     clips = client.get("/library").json()
 
     assert {"key": "Jog_Fwd_Loop", "name": "Run"} in clips
-    assert {"key": "Pistol_Aim_Up", "name": "Pistol_Aim_Up"} in clips
+    assert {"key": "Pistol_Shoot", "name": "Shoot"} in clips
+    assert {"key": "Pistol_Aim_Up", "name": "Pistol Aim Up"} in clips
+    assert {"key": "Swim_Idle_Loop", "name": "Swim Idle"} in clips
     assert set(app_module.FRIENDLY_NAMES) <= {clip["key"] for clip in clips}
 
 
@@ -169,7 +171,7 @@ def test_library_lists_every_clip_with_its_friendly_name() -> None:
     ("names", "library", "clips"),
     [
         ("", "Idle_Loop,Jog_Fwd_Loop", ["Idle", "Run"]),
-        ("Walk", "Pistol_Aim_Up", ["Walk", "Pistol_Aim_Up"]),
+        ("Walk", "Pistol_Aim_Up", ["Walk", "Pistol Aim Up"]),
     ],
 )
 def test_retarget_adds_library_clips(

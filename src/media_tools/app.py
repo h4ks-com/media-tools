@@ -60,7 +60,15 @@ FRIENDLY_NAMES = {
     "Push_Loop": "Push",
     "PickUp_Table": "Pick Up",
     "Interact": "Interact",
+    "Spell_Simple_Shoot": "Cast Spell",
+    "Pistol_Shoot": "Shoot",
 }
+
+
+def clip_name(key: str) -> str:
+    """Return the clip name we give a library animation, readable even for unmapped keys."""
+    return FRIENDLY_NAMES.get(key) or key.removesuffix("_Loop").replace("_", " ")
+
 
 cutter = pictures.Cutter(os.environ.get("CUTOUT_MODEL", "/opt/tools/isnet-general-use.onnx"))
 # We run one heavy job at a time, since a cutout or a big mesh can take gigabytes.
@@ -215,7 +223,7 @@ async def simplify_mesh(
 
 @app.get("/library")
 async def library_clips() -> list[dict[str, str]]:
-    return [{"key": key, "name": FRIENDLY_NAMES.get(key, key)} for key in LIBRARY]
+    return [{"key": key, "name": clip_name(key)} for key in LIBRARY]
 
 
 @app.post("/retarget")
@@ -240,7 +248,7 @@ async def retarget_motions(
         ):
             raise HTTPException(400, "the character or a motion is too large")
         motions = list(zip(clip_names, parts[1:], strict=True)) + [
-            (FRIENDLY_NAMES.get(key, key), LIBRARY[key].read_bytes()) for key in picked
+            (clip_name(key), LIBRARY[key].read_bytes()) for key in picked
         ]
         try:
             glb = await run_in_threadpool(in_slot, lambda: retarget(parts[0], motions, in_place))
