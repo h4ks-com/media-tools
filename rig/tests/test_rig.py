@@ -6,6 +6,7 @@ import uuid
 from pathlib import Path
 
 import app as rig_app
+import numpy
 import pytest
 from fastapi.testclient import TestClient
 
@@ -162,6 +163,15 @@ def skinned_glb(names: list[str]) -> bytes:
     )
 
 
+WEAK = document_glb(
+    {
+        "asset": {"generator": "a rig whose skin leaves a foot bare"},
+        "nodes": [{"name": name} for name in sorted(rig_app.VROID_BONES)],
+        "skins": [{"joints": list(range(len(rig_app.VROID_BONES)))}],
+    }
+)
+
+
 def fake_unirig(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, results: list[bytes | str]
 ) -> list[int]:
@@ -179,6 +189,9 @@ def fake_unirig(
         return result
 
     monkeypatch.setattr(rig_app, "rig_once", rig_once)
+    monkeypatch.setattr(
+        rig_app, "weak_limbs", lambda data: [] if data != WEAK else ["J_Bip_R_Foot"]
+    )
     return seeds
 
 
@@ -236,3 +249,57 @@ def test_a_generic_skeleton_of_another_shape_keeps_its_names() -> None:
     other = generic_skeleton(tuple(index - 1 for index in range(len(rig_app.VROID_PARENTS))))
 
     assert rig_app.name_vroid_bones(other) == other
+
+
+def weighted_glb(main_bones: list[int]) -> bytes:
+    """Return a skinned GLB whose vertices each hang fully on the given VRoid bone index."""
+    count = len(main_bones)
+    joints = numpy.zeros((count, 4), numpy.uint8)
+    joints[:, 0] = main_bones
+    weights = numpy.zeros((count, 4), numpy.float32)
+    weights[:, 0] = 1.0
+    binary = joints.tobytes() + weights.tobytes()
+    document = {
+        "nodes": [{"name": name} for name in rig_app.VROID_ORDER],
+        "skins": [{"joints": list(range(len(rig_app.VROID_ORDER)))}],
+        "meshes": [{"primitives": [{"attributes": {"JOINTS_0": 0, "WEIGHTS_0": 1}}]}],
+        "buffers": [{"byteLength": len(binary)}],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": joints.nbytes},
+            {"buffer": 0, "byteOffset": joints.nbytes, "byteLength": weights.nbytes},
+        ],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5121, "count": count, "type": "VEC4"},
+            {"bufferView": 1, "componentType": 5126, "count": count, "type": "VEC4"},
+        ],
+    }
+    text = json.dumps(document).encode()
+    text += b" " * (-len(text) % 4)
+    chunks = struct.pack("<II", len(text), 0x4E4F534A) + text
+    chunks += struct.pack("<II", len(binary), 0x004E4942) + binary
+    return struct.pack("<III", 0x46546C67, 2, 12 + len(chunks)) + chunks
+
+
+def test_a_skin_that_covers_every_limb_has_no_weak_limbs() -> None:
+    every_bone = [index for index in range(len(rig_app.VROID_ORDER)) for _ in range(10)]
+
+    assert rig_app.weak_limbs(weighted_glb(every_bone)) == []
+
+
+def test_a_limb_without_vertices_is_weak() -> None:
+    right_foot = rig_app.VROID_ORDER.index("J_Bip_R_Foot")
+    without_foot = [
+        i for i in range(len(rig_app.VROID_ORDER)) if i != right_foot for _ in range(10)
+    ]
+
+    assert rig_app.weak_limbs(weighted_glb(without_foot)) == ["J_Bip_R_Foot"]
+
+
+def test_rig_tries_again_when_the_skin_leaves_a_limb_bare(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    complete = skinned_glb(sorted(rig_app.VROID_BONES))
+    seeds = fake_unirig(tmp_path, monkeypatch, [WEAK, complete])
+
+    assert rig_app.rig(b"glTF") == complete
+    assert seeds == [0, 1]

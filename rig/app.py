@@ -17,6 +17,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
+import numpy
 from fastapi import FastAPI
 from fastapi import HTTPException
 from fastapi import Request
@@ -59,6 +60,18 @@ VROID_ORDER = (
 VROID_PARENTS = (-1, 0, 1, 2, 3, 4, 3, 6, 7, 8, 3, 10, 11, 12, 0, 14, 15, 16, 0, 18, 19, 20)
 VROID_BONES = frozenset(VROID_ORDER)
 GENERIC_BONE = re.compile(r"bone_\d+")
+LIMB_BONES = (
+    *(
+        f"J_Bip_{side}_{bone}"
+        for side in ("L", "R")
+        for bone in ("UpperArm", "LowerArm", "UpperLeg", "LowerLeg", "Foot")
+    ),
+    "J_Bip_C_Head",
+)
+MIN_BONE_SHARE = 0.005
+BIN_CHUNK = 0x004E4942
+COMPONENTS = {5121: numpy.uint8, 5123: numpy.uint16, 5126: numpy.float32}
+NORMALIZED_MAX = {5121: 255.0, 5123: 65535.0}
 JSON_CHUNK = 0x4E4F534A
 JSON_START = 20
 
@@ -215,6 +228,59 @@ def name_vroid_bones(data: bytes) -> bytes:
     return write_document(data, document)
 
 
+def read_attribute(
+    document: dict[str, object], binary: bytes, index: object, width: int
+) -> numpy.ndarray:
+    accessors, views = document.get("accessors"), document.get("bufferViews")
+    if not isinstance(accessors, list) or not isinstance(views, list) or not isinstance(index, int):
+        raise RigError("the rigged GLB has no readable skin weights")
+    accessor = accessors[index]
+    view = views[accessor["bufferView"]]
+    component = accessor["componentType"]
+    start = int(view.get("byteOffset", 0)) + int(accessor.get("byteOffset", 0))
+    values = numpy.frombuffer(binary, COMPONENTS[component], int(accessor["count"]) * width, start)
+    rows: numpy.ndarray = values.reshape(-1, width).astype(numpy.float64)
+    if accessor.get("normalized") and component in NORMALIZED_MAX:
+        return rows / NORMALIZED_MAX[component]
+    return rows
+
+
+def bone_shares(data: bytes) -> dict[str, float]:
+    """Return, per skin joint name, the share of skinned vertices it is the main bone of."""
+    document = read_document(data)
+    json_length = struct.unpack_from("<I", data, 12)[0]
+    bin_start = JSON_START + json_length
+    bin_length, bin_type = struct.unpack_from("<II", data, bin_start)
+    if bin_type != BIN_CHUNK:
+        raise RigError("the rigged GLB has no binary chunk")
+    binary = data[bin_start + 8 : bin_start + 8 + bin_length]
+    nodes, skins, meshes = document.get("nodes"), document.get("skins"), document.get("meshes")
+    if not isinstance(nodes, list) or not isinstance(skins, list) or not isinstance(meshes, list):
+        raise RigError("the rigged GLB has no skin")
+    names = [nodes[joint]["name"] for joint in skins[0]["joints"]]
+    counts = numpy.zeros(len(names))
+    for mesh in meshes:
+        for primitive in mesh.get("primitives", []):
+            attributes = primitive.get("attributes", {})
+            if "JOINTS_0" not in attributes or "WEIGHTS_0" not in attributes:
+                continue
+            joints = read_attribute(document, binary, attributes["JOINTS_0"], 4).astype(int)
+            weights = read_attribute(document, binary, attributes["WEIGHTS_0"], 4)
+            main = joints[numpy.arange(len(joints)), weights.argmax(axis=1)]
+            counts += numpy.bincount(main, minlength=len(names))[: len(names)]
+    total = counts.sum()
+    return {
+        name: float(count / total) if total else 0.0
+        for name, count in zip(names, counts, strict=True)
+    }
+
+
+def weak_limbs(data: bytes) -> list[str]:
+    """Return the limb bones that own almost no vertices, which leaves those limbs unskinned."""
+    shares = bone_shares(data)
+    return [bone for bone in LIMB_BONES if shares.get(bone, 0.0) < MIN_BONE_SHARE]
+
+
 def rig_once(decompressed: Path, attempt: Path, repo: Path, seed: int) -> bytes:
     attempt.mkdir()
     skeleton = attempt / "skeleton.fbx"
@@ -289,9 +355,13 @@ def rig(data: bytes) -> bytes:
                 continue
             rigged = name_vroid_bones(rigged)
             missing = VROID_BONES - joint_names(rigged)
-            if not missing:
+            if missing:
+                problem = "the skeleton missed " + ", ".join(sorted(missing))
+                continue
+            weak = weak_limbs(rigged)
+            if not weak:
                 return rigged
-            problem = "the skeleton missed " + ", ".join(sorted(missing))
+            problem = "the skin left almost no vertices on " + ", ".join(weak)
         raise RigError(f"no humanoid skeleton after {RIG_ATTEMPTS} tries: {problem[-1500:]}")
 
 
