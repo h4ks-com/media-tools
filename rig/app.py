@@ -69,6 +69,10 @@ LIMB_BONES = (
     "J_Bip_C_Head",
 )
 MIN_BONE_SHARE = 0.005
+TRUNK_BONES = frozenset(
+    ("J_Bip_C_Hips", "J_Bip_C_Spine", "J_Bip_C_Chest", "J_Bip_C_UpperChest", "J_Bip_C_Head")
+)
+MAX_LIMB_SHARE = 0.2
 MIN_WEIGHT = 0.1
 HEAD_HOLD = 0.5
 FLOAT = 5126
@@ -344,10 +348,29 @@ def clean_weights(data: bytes) -> bytes:
     return data[:start] + bytes(patched) + data[start + len(binary) :]
 
 
-def weak_limbs(data: bytes) -> list[str]:
+def weak_limbs(shares: dict[str, float]) -> list[str]:
     """Return the limb bones that own almost no vertices, which leaves those limbs unskinned."""
-    shares = bone_shares(data)
     return [bone for bone in LIMB_BONES if shares.get(bone, 0.0) < MIN_BONE_SHARE]
+
+
+def greedy_bones(shares: dict[str, float]) -> list[str]:
+    """Return the bones outside the trunk that own a big part of the body, like a thumb owning half.
+
+    Moving such a bone drags that part of the body along into a stretched sheet.
+    """
+    return [
+        bone for bone, share in shares.items() if bone not in TRUNK_BONES and share > MAX_LIMB_SHARE
+    ]
+
+
+def skin_problem(data: bytes) -> str:
+    """Describe what is wrong with a rig's skin, or return an empty string when it is usable."""
+    shares = bone_shares(data)
+    if weak := weak_limbs(shares):
+        return "the skin left almost no vertices on " + ", ".join(weak)
+    if greedy := greedy_bones(shares):
+        return "the skin gave most of the body to " + ", ".join(greedy)
+    return ""
 
 
 def rig_once(decompressed: Path, attempt: Path, repo: Path, seed: int) -> bytes:
@@ -427,10 +450,9 @@ def rig(data: bytes) -> bytes:
             if missing:
                 problem = "the skeleton missed " + ", ".join(sorted(missing))
                 continue
-            weak = weak_limbs(rigged)
-            if not weak:
+            problem = skin_problem(rigged)
+            if not problem:
                 return clean_weights(rigged)
-            problem = "the skin left almost no vertices on " + ", ".join(weak)
         raise RigError(f"no humanoid skeleton after {RIG_ATTEMPTS} tries: {problem[-1500:]}")
 
 

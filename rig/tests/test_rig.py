@@ -189,9 +189,7 @@ def fake_unirig(
         return result
 
     monkeypatch.setattr(rig_app, "rig_once", rig_once)
-    monkeypatch.setattr(
-        rig_app, "weak_limbs", lambda data: [] if data != WEAK else ["J_Bip_R_Foot"]
-    )
+    monkeypatch.setattr(rig_app, "skin_problem", lambda data: "" if data != WEAK else "a bare foot")
     monkeypatch.setattr(rig_app, "clean_weights", lambda data: data)
     return seeds
 
@@ -284,7 +282,7 @@ def weighted_glb(main_bones: list[int]) -> bytes:
 def test_a_skin_that_covers_every_limb_has_no_weak_limbs() -> None:
     every_bone = [index for index in range(len(rig_app.VROID_ORDER)) for _ in range(10)]
 
-    assert rig_app.weak_limbs(weighted_glb(every_bone)) == []
+    assert rig_app.skin_problem(weighted_glb(every_bone)) == ""
 
 
 def test_a_limb_without_vertices_is_weak() -> None:
@@ -293,7 +291,16 @@ def test_a_limb_without_vertices_is_weak() -> None:
         i for i in range(len(rig_app.VROID_ORDER)) if i != right_foot for _ in range(10)
     ]
 
-    assert rig_app.weak_limbs(weighted_glb(without_foot)) == ["J_Bip_R_Foot"]
+    assert rig_app.skin_problem(weighted_glb(without_foot)).endswith("J_Bip_R_Foot")
+
+
+def test_a_limb_bone_owning_most_of_the_body_is_greedy() -> None:
+    hand = rig_app.VROID_ORDER.index("J_Bip_L_Hand")
+    every_bone = [index for index in range(len(rig_app.VROID_ORDER)) for _ in range(10)]
+
+    problem = rig_app.skin_problem(weighted_glb(every_bone + [hand] * 200))
+
+    assert problem == "the skin gave most of the body to J_Bip_L_Hand"
 
 
 def test_rig_tries_again_when_the_skin_leaves_a_limb_bare(
