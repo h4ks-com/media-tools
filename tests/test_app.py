@@ -178,14 +178,36 @@ def test_retarget_adds_library_clips(
 
 
 @pytest.mark.parametrize(
-    "library", ["Nope", "../app", "Idle_Loop,Nope", "", ",".join(["Idle_Loop"] * 9)]
+    "library",
+    [
+        "Nope",
+        "../app",
+        "Idle_Loop,Nope",
+        "",
+        "Idle_Loop,Idle_Loop",
+        ",".join(list(app_module.LIBRARY)[: app_module.MAX_LIBRARY_CLIPS + 1]),
+    ],
 )
-def test_retarget_refuses_unknown_or_too_many_library_clips(walk: bytes, library: str) -> None:
+def test_retarget_refuses_unknown_repeated_or_too_many_library_clips(
+    walk: bytes, library: str
+) -> None:
     character = vroid_rig(walk)
 
     status, _ = post(f"/retarget?lengths={len(character)}&library={library}", character)
 
     assert status == 400
+
+
+def test_retarget_takes_more_library_clips_than_uploaded_motions(walk: bytes) -> None:
+    character = vroid_rig(walk)
+    library = list(app_module.LIBRARY)[: app_module.MAX_CLIPS + 2]
+
+    status, body = post(
+        f"/retarget?lengths={len(character)}&library={','.join(library)}", character
+    )
+
+    assert status == 200
+    assert len(read_glb(body)[0]["animations"]) == len(library)
 
 
 def test_retarget_needs_one_name_per_motion(walk: bytes) -> None:

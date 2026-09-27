@@ -32,6 +32,7 @@ MAX_MODEL_BYTES = 300 * 1024 * 1024
 MAX_MOTION_BYTES = 5 * 1024 * 1024
 MAX_FRAMES = 16
 MAX_CLIPS = 8
+MAX_LIBRARY_CLIPS = 24
 GLTFPACK = os.environ.get("GLTFPACK", "/opt/tools/gltfpack")
 TIMEOUT_SECONDS = float(os.environ.get("TIMEOUT_SECONDS", "600"))
 MAX_IN_FLIGHT = 4
@@ -224,14 +225,16 @@ async def retarget_motions(
     picked = [key.strip() for key in library.split(",") if key.strip()]
     if any(key not in LIBRARY for key in picked):
         raise HTTPException(400, "library takes clip keys that GET /library lists")
+    if len(picked) > MAX_LIBRARY_CLIPS or len(set(picked)) != len(picked):
+        raise HTTPException(400, f"ask for at most {MAX_LIBRARY_CLIPS} different library clips")
     with heavy_turn():
         body = await read_body(request, MAX_MODEL_BYTES + MAX_CLIPS * MAX_MOTION_BYTES)
         parts = split_body(body, lengths, range(1, MAX_CLIPS + 2))
         clip_names = [name.strip() for name in names.split(",")] if names else []
         if len(clip_names) != len(parts) - 1 or not all(clip_names):
             raise HTTPException(400, "give one clip name per motion in names")
-        if not 0 < len(clip_names) + len(picked) <= MAX_CLIPS:
-            raise HTTPException(400, f"ask for 1 to {MAX_CLIPS} clips from motions and library")
+        if not clip_names and not picked:
+            raise HTTPException(400, "ask for at least one motion or library clip")
         if len(parts[0]) > MAX_MODEL_BYTES or any(
             len(part) > MAX_MOTION_BYTES for part in parts[1:]
         ):
