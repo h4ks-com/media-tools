@@ -31,6 +31,7 @@ FACING_POWER = 1.5
 OUTLINE_PIXELS = 6
 SEAM_TEXELS = 8
 LIMB_RADIUS = 0.035  # of the model's height, the reach we center limb joints within
+NECK_HEIGHT = 0.84  # of the model's height, where the head we keep whole begins
 Box = tuple[int, int, int, int]
 Fit = tuple[float, float, float, float]
 started = time.time()
@@ -460,14 +461,15 @@ def welded_copy(mesh: bpy.types.Object) -> bpy.types.Object:
     return welded
 
 
-def rig(mesh: bpy.types.Object, bones: dict[str, tuple]) -> None:
+def rig(mesh: bpy.types.Object, whole: bpy.types.Object, bones: dict[str, tuple]) -> None:
     """Build the armature and skin the mesh with Blender's heat weights.
 
-    The glTF import splits vertices at every UV seam, which leaves heat weighting with islands, so
-    we weight a welded copy and transfer its weights back by nearest surface.
+    Heat weighting fails on the holes dropping the inner layers leaves, and the glTF import splits
+    vertices at every UV seam, so we weight a welded copy of the whole model and transfer its
+    weights to the mesh by nearest surface.
     """
     armature = build_armature(bones)
-    welded = welded_copy(mesh)
+    welded = welded_copy(whole)
     parent_to(armature, welded, "ARMATURE_AUTO")
     weighted = {g.group for v in welded.data.vertices for g in v.groups if g.weight > 0}
     empty = [g.name for g in welded.vertex_groups if g.index not in weighted]
@@ -493,7 +495,8 @@ def rig(mesh: bpy.types.Object, bones: dict[str, tuple]) -> None:
 def drop_inner_faces(mesh: bpy.types.Object) -> None:
     """Delete the layers the wrap leaves inside the model, which poke through once the skin bends.
 
-    A vertex is inside when a ray toward each of the 26 cube directions hits the model again.
+    A vertex is inside when a ray toward each of the 26 cube directions hits the model again. We
+    keep the head whole, since glasses, nose and brow cover the face from every direction.
     """
     bvh = BVHTree.FromObject(mesh, bpy.context.evaluated_depsgraph_get())
     directions = [
@@ -503,12 +506,16 @@ def drop_inner_faces(mesh: bpy.types.Object) -> None:
         for z in (-1, 0, 1)
         if (x, y, z) != (0, 0, 0)
     ]
+
     geometry = bmesh.new()
     geometry.from_mesh(mesh.data)
+    heights = [vertex.co.z for vertex in geometry.verts]
+    neck = min(heights) + NECK_HEIGHT * (max(heights) - min(heights))
     inside = {
         vertex
         for vertex in geometry.verts
-        if all(bvh.ray_cast(vertex.co + d * 1e-3, d)[0] is not None for d in directions)
+        if vertex.co.z < neck
+        and all(bvh.ray_cast(vertex.co + d * 1e-3, d)[0] is not None for d in directions)
     }
     inner = [face for face in geometry.faces if all(v in inside for v in face.verts)]
     bmesh.ops.delete(geometry, geom=inner, context="FACES_ONLY")
@@ -539,11 +546,13 @@ def main() -> None:
     with open(points_path) as points_file:
         points = {int(k): (float(v[0]), float(v[1])) for k, v in json.load(points_file).items()}
     mesh = import_mesh(model_path)
+    whole = mesh.copy()
+    whole.data = mesh.data.copy()
     drop_inner_faces(mesh)
     coords, front = texture(mesh, front_path, back_path)
     if mode == "rig":
         scale = bpy.data.images.load(front_path).size[0] / POINTS_SIZE
-        rig(mesh, skeleton(coords, front, joints(coords, front, points, scale)))
+        rig(mesh, whole, skeleton(coords, front, joints(coords, front, points, scale)))
         lap("rigged")
     bpy.ops.export_scene.gltf(filepath=target, export_format="GLB", export_animations=False)
     lap("exported")
