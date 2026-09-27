@@ -50,16 +50,16 @@ jobs:
           context: .
           push: true
           load: true
-          tags: |
-            media-tools:smoke
-            ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
       # We run the image as the pod does, so file modes and the missing network break the build.
       - name: Smoke test the image
+        env:
+          CANDIDATE: ${{ steps.meta.outputs.tags }}
         run: |
-          docker run -d --name smoke --user 1000:1000 --read-only --tmpfs /tmp --network none media-tools:smoke
+          docker run -d --name smoke --user 1000:1000 --read-only --tmpfs /tmp --network none "$CANDIDATE"
           docker exec -i smoke python - <<'EOF'
           import io
           import struct
@@ -104,7 +104,7 @@ jobs:
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           version: v0.74.0
-          image-ref: media-tools:smoke
+          image-ref: ${{ steps.meta.outputs.tags }}
           scanners: vuln
           severity: HIGH,CRITICAL
           ignore-unfixed: true
@@ -143,24 +143,24 @@ jobs:
           context: ./rig
           push: true
           load: true
-          tags: |
-            unirig:scan
-            ${{ steps.meta.outputs.tags }}
+          tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha,scope=rig
           cache-to: type=gha,scope=rig,mode=max
       # We import every package and UniRig stage module as the pod runs them, so a missing
       # shared library fails here. The runner has no GPU, so this skips CUDA kernels.
       - name: Import the rig packages and UniRig stages
+        env:
+          CANDIDATE: ${{ steps.meta.outputs.tags }}
         run: |
-          run() { docker run --rm --user 1000:1000 --network none --read-only --tmpfs /tmp -w /opt/unirig/repo unirig:scan python -c "$1"; }
+          run() { docker run --rm --user 1000:1000 --network none --read-only --tmpfs /tmp -w /opt/unirig/repo "$CANDIDATE" python -c "$1"; }
           run "import bpy, spconv.pytorch, torch_scatter, torch_cluster, flash_attn, open3d, pyrender, lightning, transformers, trimesh, fast_simplification"
           run "import src.data.extract, src.inference.merge, src.data.dataset, src.model.parse, src.system.parse"
       - name: Scan the rig image
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25
         with:
           version: v0.74.0
-          image-ref: unirig:scan
+          image-ref: ${{ steps.meta.outputs.tags }}
           scanners: vuln
           format: json
           output: rig-trivy.json
