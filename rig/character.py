@@ -490,6 +490,36 @@ def rig(mesh: bpy.types.Object, bones: dict[str, tuple]) -> None:
         mesh.modifiers.remove(extra)
 
 
+def drop_inner_faces(mesh: bpy.types.Object) -> None:
+    """Delete the layers the wrap leaves inside the model, which poke through once the skin bends.
+
+    A vertex is inside when a ray toward each of the 26 cube directions hits the model again.
+    """
+    bvh = BVHTree.FromObject(mesh, bpy.context.evaluated_depsgraph_get())
+    directions = [
+        Vector((x, y, z)).normalized()
+        for x in (-1, 0, 1)
+        for y in (-1, 0, 1)
+        for z in (-1, 0, 1)
+        if (x, y, z) != (0, 0, 0)
+    ]
+    geometry = bmesh.new()
+    geometry.from_mesh(mesh.data)
+    inside = {
+        vertex
+        for vertex in geometry.verts
+        if all(bvh.ray_cast(vertex.co + d * 1e-3, d)[0] is not None for d in directions)
+    }
+    inner = [face for face in geometry.faces if all(v in inside for v in face.verts)]
+    bmesh.ops.delete(geometry, geom=inner, context="FACES_ONLY")
+    bmesh.ops.delete(
+        geometry, geom=[v for v in geometry.verts if not v.link_faces], context="VERTS"
+    )
+    geometry.to_mesh(mesh.data)
+    geometry.free()
+    lap(f"dropped {len(inner)} inner faces")
+
+
 def import_mesh(model_path: str) -> bpy.types.Object:
     bpy.ops.wm.read_factory_settings(use_empty=True)
     bpy.ops.import_scene.gltf(filepath=model_path)
@@ -509,6 +539,7 @@ def main() -> None:
     with open(points_path) as points_file:
         points = {int(k): (float(v[0]), float(v[1])) for k, v in json.load(points_file).items()}
     mesh = import_mesh(model_path)
+    drop_inner_faces(mesh)
     coords, front = texture(mesh, front_path, back_path)
     if mode == "rig":
         scale = bpy.data.images.load(front_path).size[0] / POINTS_SIZE
