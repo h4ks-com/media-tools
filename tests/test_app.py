@@ -37,12 +37,23 @@ def test_pose_returns_a_png() -> None:
     assert Image.open(io.BytesIO(response.content)).size == (512, 512)
 
 
+def test_the_tpose_is_a_symmetric_front_view_with_level_arms() -> None:
+    response = client.get("/pose", params={"move": "tpose"})
+
+    picture = numpy.asarray(Image.open(io.BytesIO(response.content)))
+    lit = numpy.argwhere(picture.sum(axis=2) > 0)
+    rows, columns = lit[:, 0], lit[:, 1]
+    assert response.status_code == 200
+    assert abs((columns.min() + columns.max()) / 2 - 256) < 2
+    assert columns.max() - columns.min() > 0.9 * (rows.max() - rows.min())
+
+
 def test_a_bad_pose_is_a_400() -> None:
     response = client.get("/pose", params={"move": "dance"})
 
     assert (response.status_code, response.text) == (
         400,
-        "move is one of idle, walk, run, jump, attack, hurt",
+        "move is one of idle, walk, run, jump, attack, hurt, tpose",
     )
 
 

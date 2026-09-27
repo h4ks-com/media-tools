@@ -29,6 +29,7 @@ COLORS = [
 ]  # fmt: skip
 LINE_SHADE = 0.6
 JOINT_RADIUS = 5
+TPOSE = "tpose"
 
 
 @dataclass(frozen=True)
@@ -175,16 +176,32 @@ def keypoints(body: Pose) -> dict[int, Point]:
     return points
 
 
-def skeleton_png(move: str, frames: int, frame: int) -> bytes:
-    """Return the OpenPose skeleton for one frame of a preset move, as a PNG on black.
+def front_tpose() -> dict[int, Point]:
+    """Return a front-view T-pose: arms straight out at shoulder height, legs slightly apart.
 
-    :raises ValueError: when the move is unknown or the frame is out of range.
+    The character faces the viewer, so its right side is on the left of the picture.
     """
-    if move not in MOVES:
-        raise ValueError(f"move is one of {', '.join(MOVES)}")
-    if not 0 <= frame < frames:
-        raise ValueError("frame must be below frames")
-    points = keypoints(MOVES[move](frames)[frame])
+    middle = SIZE / 2
+    points: dict[int, Point] = {
+        0: (middle, 92),
+        1: (middle, 130),
+        14: (middle - 10, 84),
+        15: (middle + 10, 84),
+        16: (middle - 20, 90),
+        17: (middle + 20, 90),
+    }
+    for side, shoulder_index, hip_index in ((-1, 2, 8), (1, 5, 11)):
+        points[shoulder_index] = (middle + side * 38, 136)
+        points[shoulder_index + 1] = (middle + side * 118, 136)
+        points[shoulder_index + 2] = (middle + side * 196, 136)
+        points[hip_index] = (middle + side * 28, 262)
+        points[hip_index + 1] = (middle + side * 36, 358)
+        points[hip_index + 2] = (middle + side * 44, 458)
+    return points
+
+
+def draw(points: dict[int, Point]) -> bytes:
+    """Draw OpenPose COCO-18 points and limbs as a PNG on black."""
     picture = Image.new("RGB", (SIZE, SIZE), "black")
     pen = ImageDraw.Draw(picture)
     for index, (a, b) in enumerate(LIMBS):
@@ -198,3 +215,19 @@ def skeleton_png(move: str, frames: int, frame: int) -> bytes:
     output = io.BytesIO()
     picture.save(output, format="PNG")
     return output.getvalue()
+
+
+def skeleton_png(move: str, frames: int, frame: int) -> bytes:
+    """Return the OpenPose skeleton for one frame of a preset move, as a PNG on black.
+
+    The move tpose is one front-view frame, for drawing a character ready to rig.
+
+    :raises ValueError: when the move is unknown or the frame is out of range.
+    """
+    if move == TPOSE:
+        return draw(front_tpose())
+    if move not in MOVES:
+        raise ValueError(f"move is one of {', '.join([*MOVES, TPOSE])}")
+    if not 0 <= frame < frames:
+        raise ValueError("frame must be below frames")
+    return draw(keypoints(MOVES[move](frames)[frame]))
