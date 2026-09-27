@@ -42,14 +42,13 @@ jobs:
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804
         with:
           images: ghcr.io/${{ github.repository }}
-          tags: |
-            type=ref,event=branch
-            type=raw,value=latest
-            type=sha
-      # We build once and push the loaded image, so the registry gets the bytes we tested.
+          tags: type=sha
+      # We push a candidate tag and load the same build, so layers keep their digests in the
+      # registry and the image we test is the image we release.
       - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
         with:
           context: .
+          push: true
           load: true
           tags: |
             media-tools:smoke
@@ -106,13 +105,15 @@ jobs:
         with:
           version: v0.74.0
           image-ref: media-tools:smoke
+          scanners: vuln
           severity: HIGH,CRITICAL
           ignore-unfixed: true
           exit-code: "1"
-      - name: Push the tested image
+      - name: Release the tested image
         env:
-          TAGS: ${{ steps.meta.outputs.tags }}
-        run: for tag in $TAGS; do docker push "$tag"; done
+          IMAGE: ghcr.io/${{ github.repository }}
+          CANDIDATE: ${{ steps.meta.outputs.tags }}
+        run: docker buildx imagetools create -t "$IMAGE:latest" -t "$IMAGE:main" "$CANDIDATE"
 
   publish-rig:
     needs: [quality]
@@ -133,16 +134,14 @@ jobs:
         uses: docker/metadata-action@902fa8ec7d6ecbf8d84d538b9b233a880e428804
         with:
           images: ghcr.io/${{ github.repository }}-rig
-          tags: |
-            type=ref,event=branch
-            type=raw,value=latest
-            type=sha
+          tags: type=sha
       # We free space because the loaded CUDA image outgrows the runner's default disk.
       - name: Free disk space
         run: sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL
       - uses: docker/build-push-action@263435318d21b8e681c14492fe198d362a7d2c83
         with:
           context: ./rig
+          push: true
           load: true
           tags: |
             unirig:scan
@@ -162,6 +161,7 @@ jobs:
         with:
           version: v0.74.0
           image-ref: unirig:scan
+          scanners: vuln
           format: json
           output: rig-trivy.json
       - name: Scan its base image
@@ -170,6 +170,7 @@ jobs:
           version: v0.74.0
           skip-setup-trivy: true
           image-ref: pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime
+          scanners: vuln
           format: json
           output: base-trivy.json
       # We fail on fixable criticals in what we install and report the ones the base brings
@@ -189,7 +190,8 @@ jobs:
             rig-trivy.json
             base-trivy.json
             trivy-report.md
-      - name: Push the scanned image
+      - name: Release the scanned image
         env:
-          TAGS: ${{ steps.meta.outputs.tags }}
-        run: for tag in $TAGS; do docker push "$tag"; done
+          IMAGE: ghcr.io/${{ github.repository }}-rig
+          CANDIDATE: ${{ steps.meta.outputs.tags }}
+        run: docker buildx imagetools create -t "$IMAGE:latest" -t "$IMAGE:main" "$CANDIDATE"
