@@ -192,6 +192,7 @@ def fake_unirig(
     monkeypatch.setattr(
         rig_app, "weak_limbs", lambda data: [] if data != WEAK else ["J_Bip_R_Foot"]
     )
+    monkeypatch.setattr(rig_app, "clean_weights", lambda data: data)
     return seeds
 
 
@@ -303,3 +304,39 @@ def test_rig_tries_again_when_the_skin_leaves_a_limb_bare(
 
     assert rig_app.rig(b"glTF") == complete
     assert seeds == [0, 1]
+
+
+def test_cleaning_drops_small_weights_and_keeps_the_main_bone() -> None:
+    joints = numpy.array([[1, 2, 3, 4], [5, 6, 0, 0]])
+    weights = numpy.array([[0.6, 0.35, 0.04, 0.01], [0.05, 0.03, 0.0, 0.0]])
+
+    result = rig_app.cleaned(joints, weights, head=9)
+
+    numpy.testing.assert_allclose(result[0], [0.6 / 0.95, 0.35 / 0.95, 0.0, 0.0])
+    numpy.testing.assert_allclose(result[1], [1.0, 0.0, 0.0, 0.0])
+
+
+def test_cleaning_gives_head_vertices_wholly_to_the_head() -> None:
+    head = rig_app.VROID_ORDER.index("J_Bip_C_Head")
+    joints = numpy.array([[head, 4, 3, 0], [4, head, 3, 0]])
+    weights = numpy.array([[0.55, 0.3, 0.15, 0.0], [0.5, 0.3, 0.2, 0.0]])
+
+    result = rig_app.cleaned(joints, weights, head)
+
+    numpy.testing.assert_allclose(result[0], [1.0, 0.0, 0.0, 0.0])
+    numpy.testing.assert_allclose(result[1], [0.5, 0.3, 0.2, 0.0])
+
+
+def test_clean_weights_rewrites_float_weights_in_place() -> None:
+    head = rig_app.VROID_ORDER.index("J_Bip_C_Head")
+    data = weighted_glb([head, 3, 7])
+
+    cleaned_glb = rig_app.clean_weights(data)
+
+    assert len(cleaned_glb) == len(data)
+    assert rig_app.bone_shares(cleaned_glb) == rig_app.bone_shares(data)
+
+
+def test_a_glb_without_binary_chunk_is_refused() -> None:
+    with pytest.raises(rig_app.RigError, match="binary chunk"):
+        rig_app.binary_chunk(document_glb({"nodes": []}))

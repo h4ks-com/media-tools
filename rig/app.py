@@ -69,6 +69,10 @@ LIMB_BONES = (
     "J_Bip_C_Head",
 )
 MIN_BONE_SHARE = 0.005
+MIN_WEIGHT = 0.1
+HEAD_HOLD = 0.5
+FLOAT = 5126
+WEIGHT_ROW = 16
 BIN_CHUNK = 0x004E4942
 COMPONENTS = {5121: numpy.uint8, 5123: numpy.uint16, 5126: numpy.float32}
 NORMALIZED_MAX = {5121: 255.0, 5123: 65535.0}
@@ -245,15 +249,22 @@ def read_attribute(
     return rows
 
 
-def bone_shares(data: bytes) -> dict[str, float]:
-    """Return, per skin joint name, the share of skinned vertices it is the main bone of."""
-    document = read_document(data)
+def binary_chunk(data: bytes) -> tuple[int, bytes]:
+    """Return where the GLB binary chunk's data starts, and that data."""
     json_length = struct.unpack_from("<I", data, 12)[0]
     bin_start = JSON_START + json_length
+    if len(data) < bin_start + 8:
+        raise RigError("the rigged GLB has no binary chunk")
     bin_length, bin_type = struct.unpack_from("<II", data, bin_start)
     if bin_type != BIN_CHUNK:
         raise RigError("the rigged GLB has no binary chunk")
-    binary = data[bin_start + 8 : bin_start + 8 + bin_length]
+    return bin_start + 8, data[bin_start + 8 : bin_start + 8 + bin_length]
+
+
+def bone_shares(data: bytes) -> dict[str, float]:
+    """Return, per skin joint name, the share of skinned vertices it is the main bone of."""
+    document = read_document(data)
+    _, binary = binary_chunk(data)
     nodes, skins, meshes = document.get("nodes"), document.get("skins"), document.get("meshes")
     if not isinstance(nodes, list) or not isinstance(skins, list) or not isinstance(meshes, list):
         raise RigError("the rigged GLB has no skin")
@@ -273,6 +284,64 @@ def bone_shares(data: bytes) -> dict[str, float]:
         name: float(count / total) if total else 0.0
         for name, count in zip(names, counts, strict=True)
     }
+
+
+def cleaned(joints: numpy.ndarray, weights: numpy.ndarray, head: int) -> numpy.ndarray:
+    """Return skin weights without stray small influences and with the head held rigid.
+
+    UniRig spreads small weights to far bones, which drags belts, straps and faces along with
+    them, so we keep each vertex's main bone, drop influences under MIN_WEIGHT and give head
+    vertices wholly to the head.
+    """
+    rows = numpy.arange(len(weights))
+    main = weights.argmax(axis=1)
+    kept = numpy.where(weights >= MIN_WEIGHT, weights, 0.0)
+    kept[rows, main] = weights[rows, main]
+    rigid = (joints[rows, main] == head) & (weights[rows, main] >= HEAD_HOLD)
+    kept[rigid] = 0.0
+    kept[rigid, main[rigid]] = 1.0
+    total = kept.sum(axis=1, keepdims=True)
+    result: numpy.ndarray = numpy.divide(kept, total, out=weights.copy(), where=total > 0)
+    return result
+
+
+def clean_weights(data: bytes) -> bytes:
+    """Return the GLB with its packed float skin weights cleaned; other formats stay as they are."""
+    document = read_document(data)
+    start, binary = binary_chunk(data)
+    nodes, skins, meshes = document.get("nodes"), document.get("skins"), document.get("meshes")
+    accessors, views = document.get("accessors"), document.get("bufferViews")
+    if not (
+        isinstance(nodes, list)
+        and isinstance(skins, list)
+        and isinstance(meshes, list)
+        and isinstance(accessors, list)
+        and isinstance(views, list)
+    ):
+        return data
+    names = [nodes[joint]["name"] for joint in skins[0]["joints"]]
+    if "J_Bip_C_Head" not in names:
+        return data
+    head = names.index("J_Bip_C_Head")
+    patched = bytearray(binary)
+    for mesh in meshes:
+        for primitive in mesh.get("primitives", []):
+            attributes = primitive.get("attributes", {})
+            if "JOINTS_0" not in attributes or "WEIGHTS_0" not in attributes:
+                continue
+            accessor = accessors[attributes["WEIGHTS_0"]]
+            view = views[accessor["bufferView"]]
+            if (
+                accessor["componentType"] != FLOAT
+                or view.get("byteStride", WEIGHT_ROW) != WEIGHT_ROW
+            ):
+                continue
+            joints = read_attribute(document, binary, attributes["JOINTS_0"], 4).astype(int)
+            weights = read_attribute(document, binary, attributes["WEIGHTS_0"], 4)
+            offset = int(view.get("byteOffset", 0)) + int(accessor.get("byteOffset", 0))
+            values = cleaned(joints, weights, head).astype(numpy.float32).tobytes()
+            patched[offset : offset + len(values)] = values
+    return data[:start] + bytes(patched) + data[start + len(binary) :]
 
 
 def weak_limbs(data: bytes) -> list[str]:
@@ -360,7 +429,7 @@ def rig(data: bytes) -> bytes:
                 continue
             weak = weak_limbs(rigged)
             if not weak:
-                return rigged
+                return clean_weights(rigged)
             problem = "the skin left almost no vertices on " + ", ".join(weak)
         raise RigError(f"no humanoid skeleton after {RIG_ATTEMPTS} tries: {problem[-1500:]}")
 
