@@ -77,6 +77,8 @@ warn_redundant_casts = true
 warn_return_any = true
 files = ["src/media_tools", "tests", "rig", "scripts"]
 mypy_path = "rig"
+# character.py runs inside Blender, whose bpy module has no type information outside it.
+exclude = ["rig/character\\.py"]
 
 [[tool.mypy.overrides]]
 module = ["onnxruntime"]

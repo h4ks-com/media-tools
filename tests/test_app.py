@@ -1,4 +1,5 @@
 import io
+import math
 import struct
 import zlib
 from collections.abc import Callable
@@ -53,8 +54,24 @@ def test_a_bad_pose_is_a_400() -> None:
 
     assert (response.status_code, response.text) == (
         400,
-        "move is one of idle, walk, run, jump, attack, hurt, tpose",
+        "move is one of idle, walk, run, jump, attack, hurt, tpose, spread",
     )
+
+
+def test_spread_points_hang_the_arms_30_degrees_below_the_shoulders() -> None:
+    points = client.get("/pose/points", params={"move": "spread"}).json()
+
+    shoulder_x, shoulder_y = points["5"]
+    wrist_x, wrist_y = points["7"]
+    assert round(math.degrees(math.atan2(wrist_y - shoulder_y, wrist_x - shoulder_x))) == 30
+    assert points["2"][1] == points["5"][1]
+    assert client.get("/pose", params={"move": "spread"}).status_code == 200
+
+
+def test_only_still_poses_have_points() -> None:
+    response = client.get("/pose/points", params={"move": "walk"})
+
+    assert (response.status_code, response.text) == (400, "move is one of tpose, spread")
 
 
 def test_key_cutout_returns_a_transparent_png() -> None:

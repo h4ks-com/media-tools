@@ -1,4 +1,4 @@
-"""HTTP service that rigs a humanoid GLB with the UniRig vroid skeleton.
+"""HTTP service that rigs humanoid GLBs: /rig with UniRig, /character from their drawn pose.
 
 Reachable only from n8n, with no egress of its own: every tool is baked into the image
 and the pod mounts the model weights read-only. One request runs on the GPU at a time.
@@ -10,7 +10,8 @@ import re
 import shutil
 import signal
 import struct
-import subprocess  # nosec B404: we run only gltfpack and UniRig's scripts, with arguments we build
+import subprocess  # nosec B404: we run only gltfpack, UniRig's scripts and character.py, with arguments we build
+import sys
 import tempfile
 import threading
 from collections.abc import Iterator
@@ -82,6 +83,11 @@ COMPONENTS = {5121: numpy.uint8, 5123: numpy.uint16, 5126: numpy.float32}
 NORMALIZED_MAX = {5121: 255.0, 5123: 65535.0}
 JSON_CHUNK = 0x4E4F534A
 JSON_START = 20
+CHARACTER_SCRIPT = Path(__file__).with_name("character.py")
+CHARACTER_PARTS = 3
+PNG_MAGIC = b"\x89PNG\r\n\x1a\n"
+POINTS_SIZE = 512
+POSE_JOINTS = frozenset(str(index) for index in range(14))
 
 gpu_slot = threading.Lock()
 in_flight = 0
@@ -454,6 +460,113 @@ def rig(data: bytes) -> bytes:
             if not problem:
                 return clean_weights(rigged)
         raise RigError(f"no humanoid skeleton after {RIG_ATTEMPTS} tries: {problem[-1500:]}")
+
+
+def run_character(workdir: Path, mode: str) -> bytes:
+    output = workdir / f"{mode}.glb"
+    run_stage(
+        [
+            sys.executable,
+            str(CHARACTER_SCRIPT),
+            str(workdir / "model.glb"),
+            str(workdir / "front.png"),
+            str(workdir / "back.png"),
+            str(workdir / "points.json"),
+            str(output),
+            mode,
+        ],
+        output,
+    )
+    return output.read_bytes()
+
+
+def character(model: bytes, front: bytes, back: bytes, points: dict[str, list[float]]) -> bytes:
+    """Texture a wrapped character from its front and back pictures and rig it from its pose.
+
+    We place the skeleton where the pose puts the joints and skin it with heat weights; when that
+    skin fails our checks, UniRig rigs the textured model instead.
+
+    :raises RigError: when texturing fails or neither rig works.
+    """
+    with tempfile.TemporaryDirectory() as workdir_name:
+        workdir = Path(workdir_name)
+        (workdir / "model.glb").write_bytes(model)
+        (workdir / "front.png").write_bytes(front)
+        (workdir / "back.png").write_bytes(back)
+        (workdir / "points.json").write_text(json.dumps(points))
+        try:
+            rigged = run_character(workdir, "rig")
+        except RigError:
+            return rig(run_character(workdir, "texture"))
+        if skin_problem(rigged):
+            return rig(run_character(workdir, "texture"))
+        return rigged
+
+
+def split_parts(body: bytes, lengths: str) -> list[bytes]:
+    """Split a body of files sent back to back by their byte lengths.
+
+    :raises HTTPException: 400 when the lengths do not add up to the body.
+    """
+    sizes = [int(size) for size in lengths.split(",") if size.isdigit()]
+    if len(sizes) != CHARACTER_PARTS or sum(sizes) != len(body) or 0 in sizes:
+        raise HTTPException(
+            400, "send the model, front and back back to back with their byte lengths"
+        )
+    parts, start = [], 0
+    for size in sizes:
+        parts.append(body[start : start + size])
+        start += size
+    return parts
+
+
+def parse_points(points: str) -> dict[str, list[float]]:
+    """Return the pose points as numbers only, so nothing from the request reaches Blender as code.
+
+    :raises HTTPException: 400 when they are not the COCO-18 joints we rig from.
+    """
+    try:
+        raw = json.loads(points)
+        parsed = {str(int(key)): [float(value[0]), float(value[1])] for key, value in raw.items()}
+    except (ValueError, TypeError, KeyError, IndexError, AttributeError) as error:
+        raise HTTPException(400, "send points as JSON of joint index to [x, y]") from error
+    if not set(parsed) >= POSE_JOINTS or any(
+        not (0 <= x <= POINTS_SIZE and 0 <= y <= POINTS_SIZE) for x, y in parsed.values()
+    ):
+        raise HTTPException(400, f"send the joints 0 to 13 inside a {POINTS_SIZE}-pixel square")
+    return parsed
+
+
+def character_in_slot(
+    model: bytes, front: bytes, back: bytes, points: dict[str, list[float]]
+) -> bytes:
+    with gpu_slot:
+        return character(model, front, back, points)
+
+
+@app.post("/character")
+async def character_route(request: Request, lengths: str, points: str) -> Response:
+    with gpu_turn():
+        declared = request.headers.get("content-length", "")
+        if not declared.isdigit() or not 0 < int(declared) <= MAX_MODEL_BYTES:
+            raise HTTPException(
+                400, f"send a body of 1 to {MAX_MODEL_BYTES} bytes with its Content-Length"
+            )
+        model, front, back = split_parts(await request.body(), lengths)
+        if model[:4] != b"glTF" or front[:8] != PNG_MAGIC or back[:8] != PNG_MAGIC:
+            raise HTTPException(400, "send a binary GLB then two PNG pictures")
+        try:
+            check_embedded(model)
+            glb = await run_in_threadpool(
+                character_in_slot, model, front, back, parse_points(points)
+            )
+        except RigError as error:
+            raise HTTPException(422, str(error)) from error
+    return Response(
+        glb,
+        media_type="model/gltf-binary",
+        headers={"Content-Disposition": 'inline; filename="character.glb"'},
+    )
 
 
 @app.exception_handler(HTTPException)

@@ -56,7 +56,7 @@ RUN python -m zipfile -e /tmp/gltfpack.zip /opt/tools \
 ENV HF_HUB_OFFLINE=1 \
     TRANSFORMERS_OFFLINE=1
 
-COPY app.py /opt/unirig/app.py
+COPY app.py character.py /opt/unirig/
 
 RUN groupadd --system --gid 1000 rig && useradd --system --uid 1000 --gid rig rig
 

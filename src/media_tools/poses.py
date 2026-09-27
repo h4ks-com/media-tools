@@ -30,6 +30,10 @@ COLORS = [
 LINE_SHADE = 0.6
 JOINT_RADIUS = 5
 TPOSE = "tpose"
+SPREAD = "spread"
+SPREAD_ANGLE = math.radians(30)
+UPPER_ARM_REACH = 80
+FOREARM_REACH = 78
 
 
 @dataclass(frozen=True)
@@ -200,6 +204,36 @@ def front_tpose() -> dict[int, Point]:
     return points
 
 
+def front_spread() -> dict[int, Point]:
+    """Return a front-view pose with straight arms 30 degrees below horizontal, legs slightly apart.
+
+    A character drawn like this rigs well: the arms clear the torso, and walking bends the
+    shoulders far less than from a T-pose.
+    """
+    points = front_tpose()
+    for side, shoulder_index in ((-1, 2), (1, 5)):
+        shoulder_x, shoulder_y = points[shoulder_index]
+        for joint, reach in ((1, UPPER_ARM_REACH), (2, UPPER_ARM_REACH + FOREARM_REACH)):
+            points[shoulder_index + joint] = (
+                shoulder_x + side * reach * math.cos(SPREAD_ANGLE),
+                shoulder_y + reach * math.sin(SPREAD_ANGLE),
+            )
+    return points
+
+
+STILL_POSES: dict[str, Callable[[], dict[int, Point]]] = {TPOSE: front_tpose, SPREAD: front_spread}
+
+
+def still_points(move: str) -> dict[int, Point]:
+    """Return the COCO-18 points of a still front-view pose, in a SIZE-pixel square.
+
+    :raises ValueError: when the move is not a still pose.
+    """
+    if move not in STILL_POSES:
+        raise ValueError(f"move is one of {', '.join(STILL_POSES)}")
+    return STILL_POSES[move]()
+
+
 def draw(points: dict[int, Point]) -> bytes:
     """Draw OpenPose COCO-18 points and limbs as a PNG on black."""
     picture = Image.new("RGB", (SIZE, SIZE), "black")
@@ -220,14 +254,14 @@ def draw(points: dict[int, Point]) -> bytes:
 def skeleton_png(move: str, frames: int, frame: int) -> bytes:
     """Return the OpenPose skeleton for one frame of a preset move, as a PNG on black.
 
-    The move tpose is one front-view frame, for drawing a character ready to rig.
+    The moves tpose and spread are one front-view frame each, for drawing a character ready to rig.
 
     :raises ValueError: when the move is unknown or the frame is out of range.
     """
-    if move == TPOSE:
-        return draw(front_tpose())
+    if move in STILL_POSES:
+        return draw(STILL_POSES[move]())
     if move not in MOVES:
-        raise ValueError(f"move is one of {', '.join([*MOVES, TPOSE])}")
+        raise ValueError(f"move is one of {', '.join([*MOVES, *STILL_POSES])}")
     if not 0 <= frame < frames:
         raise ValueError("frame must be below frames")
     return draw(keypoints(MOVES[move](frames)[frame]))

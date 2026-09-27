@@ -347,3 +347,70 @@ def test_clean_weights_rewrites_float_weights_in_place() -> None:
 def test_a_glb_without_binary_chunk_is_refused() -> None:
     with pytest.raises(rig_app.RigError, match="binary chunk"):
         rig_app.binary_chunk(document_glb({"nodes": []}))
+
+
+PNG = b"\x89PNG\r\n\x1a\n" + b"picture"
+POINTS = json.dumps({str(index): [100 + index, 200] for index in range(18)})
+
+
+def character_body(model: bytes) -> tuple[bytes, dict[str, str]]:
+    body = model + PNG + PNG
+    return body, {"lengths": f"{len(model)},{len(PNG)},{len(PNG)}", "points": POINTS}
+
+
+def test_character_returns_the_pose_rig_when_its_skin_is_sound(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    modes: list[str] = []
+
+    def run_character(workdir: Path, mode: str) -> bytes:
+        modes.append(mode)
+        return b"rigged"
+
+    monkeypatch.setattr(rig_app, "run_character", run_character)
+    monkeypatch.setattr(rig_app, "skin_problem", lambda data: "")
+    body, params = character_body(document_glb({"buffers": [{"byteLength": 4}]}))
+
+    response = client.post("/character", content=body, params=params)
+
+    assert (response.status_code, response.content, modes) == (200, b"rigged", ["rig"])
+
+
+@pytest.mark.parametrize("failure", ["skin", "stage"])
+def test_character_falls_back_to_unirig_on_the_textured_model(
+    monkeypatch: pytest.MonkeyPatch, failure: str
+) -> None:
+    def run_character(workdir: Path, mode: str) -> bytes:
+        if mode == "rig" and failure == "stage":
+            raise rig_app.RigError("heat weighting left these bones without vertices")
+        return mode.encode()
+
+    monkeypatch.setattr(rig_app, "run_character", run_character)
+    monkeypatch.setattr(rig_app, "skin_problem", lambda data: "a bare foot")
+    monkeypatch.setattr(rig_app, "rig", lambda data: b"unirig:" + data)
+    body, params = character_body(document_glb({"buffers": [{"byteLength": 4}]}))
+
+    response = client.post("/character", content=body, params=params)
+
+    assert (response.status_code, response.content) == (200, b"unirig:texture")
+
+
+def test_character_refuses_lengths_that_do_not_add_up() -> None:
+    body, params = character_body(document_glb({"buffers": [{"byteLength": 4}]}))
+
+    response = client.post("/character", content=body + b"x", params=params)
+
+    assert response.status_code == 400
+    assert "byte lengths" in response.text
+
+
+@pytest.mark.parametrize(
+    "points",
+    ["not json", json.dumps({"0": [1, 2]}), json.dumps({str(i): [900, 1] for i in range(14)})],
+)
+def test_character_refuses_bad_points(points: str) -> None:
+    body, params = character_body(document_glb({"buffers": [{"byteLength": 4}]}))
+
+    response = client.post("/character", content=body, params={**params, "points": points})
+
+    assert response.status_code == 400

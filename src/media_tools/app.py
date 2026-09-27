@@ -153,6 +153,16 @@ async def pose(
     return named_file(png, "pose.png")
 
 
+@app.get("/pose/points")
+async def pose_points(move: str) -> dict[str, tuple[float, float]]:
+    """Return a still pose's COCO-18 points, where the rig finds a drawn character's joints."""
+    try:
+        points = poses.still_points(move)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    return {str(index): point for index, point in points.items()}
+
+
 @app.post("/cutout")
 async def cutout(request: Request, method: pictures.CutMethod = "isnet") -> Response:
     with heavy_turn():
