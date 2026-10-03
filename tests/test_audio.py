@@ -40,7 +40,7 @@ def test_convert_refuses_what_is_no_audio() -> None:
 
 def test_the_bed_plays_before_and_after_the_voices(tmp_path: Path) -> None:
     path = tmp_path / "mixed.wav"
-    path.write_bytes(audio.mix_bed(tone(2.0), tone(3.0, rate=44100), 60))
+    path.write_bytes(audio.mix_bed(tone(2.0), tone(3.0, rate=44100), 0.3, 60))
 
     facts = ffmpeg.probe(path, 60)
 

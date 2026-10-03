@@ -314,12 +314,14 @@ async def convert_audio(
 
 
 @app.post("/mix-bed")
-async def mix_bed(request: Request, lengths: str) -> Response:
+async def mix_bed(
+    request: Request, lengths: str, bed_volume: Annotated[float, Query(gt=0, le=1)] = 0.3
+) -> Response:
     """Take the spoken track then the music, and lay the voices over the music."""
     with heavy_turn():
         body = await read_body(request, MAX_MEDIA_BYTES)
         voice, bed = split_body(body, lengths, range(2, 3))
-        data = await run_media(lambda: audio.mix_bed(voice, bed, TIMEOUT_SECONDS))
+        data = await run_media(lambda: audio.mix_bed(voice, bed, bed_volume, TIMEOUT_SECONDS))
     return named_file(data, "mixed.wav")
 
 

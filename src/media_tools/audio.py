@@ -48,22 +48,22 @@ def convert(
         return target.read_bytes()
 
 
-def bed_mix_graph(seconds: float, rate: int) -> str:
+def bed_mix_graph(seconds: float, rate: int, bed_volume: float) -> str:
     """Lay voices over a looping bed that ducks under speech, with 8 s of music around them."""
     total = seconds + 2 * BED_PADDING_SECONDS
     return (
         f"[0:a]aresample={rate},aformat=channel_layouts=stereo,"
         f"adelay={BED_PADDING_SECONDS}s:all=1,apad=pad_dur={BED_PADDING_SECONDS},asplit[voice][key];"
         f"[1:a]aresample={rate},aformat=channel_layouts=stereo,"
-        "aloop=loop=-1:size=2147483647,volume=0.3[bed];"
+        f"aloop=loop=-1:size=2147483647,volume={bed_volume}[bed];"
         "[bed][key]sidechaincompress=threshold=0.015:ratio=8:attack=150:release=1500[ducked];"
         f"[ducked]afade=t=in:d=2,afade=t=out:st={total - 4:.3f}:d=4[music];"
         "[voice][music]amix=inputs=2:normalize=0:duration=first[out]"
     )
 
 
-def mix_bed(voice: bytes, bed: bytes, timeout: float) -> bytes:
-    """Lay the voices over the music bed and answer with a stereo WAV at the voices' rate.
+def mix_bed(voice: bytes, bed: bytes, bed_volume: float, timeout: float) -> bytes:
+    """Lay the voices over the bed at that volume; answer with a stereo WAV at the voices' rate.
 
     :raises FfmpegError: when ffmpeg cannot read the tracks.
     """
@@ -75,7 +75,7 @@ def mix_bed(voice: bytes, bed: bytes, timeout: float) -> bytes:
         facts = ffmpeg.probe(voice_path, timeout)
         arguments = [*ffmpeg.AUDIO_GUARD, "-i", str(voice_path), *ffmpeg.AUDIO_GUARD]
         arguments += ["-i", str(bed_path), "-filter_complex"]
-        arguments += [bed_mix_graph(facts.seconds, facts.sample_rate), "-map", "[out]"]
+        arguments += [bed_mix_graph(facts.seconds, facts.sample_rate, bed_volume), "-map", "[out]"]
         ffmpeg.run([*arguments, "-c:a", "pcm_s16le", "-y", str(target)], timeout)
         return target.read_bytes()
 

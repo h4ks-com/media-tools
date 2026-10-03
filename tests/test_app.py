@@ -447,9 +447,15 @@ def test_converting_no_audio_is_a_422() -> None:
 def test_mix_bed_takes_the_voice_then_the_music() -> None:
     lengths, body = joined(tone(1.0), tone(1.0))
 
-    status, mixed = post(f"/mix-bed?lengths={lengths}", body)
+    status, mixed = post(f"/mix-bed?lengths={lengths}&bed_volume=0.15", body)
 
     assert (status, mixed[:4]) == (200, b"RIFF")
+
+
+def test_the_bed_volume_must_be_audible_and_at_most_full() -> None:
+    lengths, body = joined(tone(1.0), tone(1.0))
+
+    assert post(f"/mix-bed?lengths={lengths}&bed_volume=2", body)[0] == 422
 
 
 def test_mix_bed_needs_two_files() -> None:
