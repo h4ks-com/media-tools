@@ -69,7 +69,7 @@ BACKGROUNDS: dict[Background, str] = {
 }
 
 
-# Tag colours for the speakers in order of first appearance, as ASS &HAABBGGRR.
+# Name colours for the speakers in order of first appearance, as ASS &HAABBGGRR.
 SPEAKER_COLOURS = (
     "&H005F5AFF",
     "&H00D8B400",
@@ -233,6 +233,15 @@ def karaoke_line(words: list[Word], shown_from: float, highlight: Highlight, loo
     return "".join(parts).rstrip()
 
 
+def speaker_tag(speaker: str, colour: str, look: Look) -> str:
+    """Return `NAME: ` in the speaker's colour, then switch back to the karaoke colours."""
+    name = inline_colour(colour)
+    return (
+        f"{{\\k0\\1c{name}\\2c{name}}}{ass_text(speaker.upper())}: "
+        f"{{\\1c{inline_colour(look.sung)}\\2c{inline_colour(look.unsung)}}}"
+    )
+
+
 def trim_lead_in(line: list[Word]) -> list[Word]:
     """Start a line's first word at most a second before it ends.
 
@@ -265,8 +274,6 @@ def ass_header(look: Look) -> str:
         ),
         style_line("Next", 44, "&H90FFFFFF,&H90FFFFFF", look.outline, "1,0,1,2,0,5,60,60,0,1"),
         style_line("Title", 34, "&H00FFFFFF,&H00FFFFFF", look.outline, "2,0,1,2,0,8,60,60,40,1"),
-        # Border style 3 draws the outline colour as a box behind the name.
-        style_line("Speaker", 30, "&H00FFFFFF,&H00FFFFFF", "&H00000000", "1,0,3,8,0,5,60,60,0,1"),
     ]
     lines = [
         "[Script Info]",
@@ -302,16 +309,15 @@ def build_ass(words: list[Word], title: str, style: Style) -> str:
             shown_until = min(shown_until, upcoming[0].start - 0.05)
         shown_until = max(shown_until, line[-1].end + 0.2)
         span = f"{timestamp(shown_from)},{timestamp(shown_until)}"
+        speaker = line[0].speaker
+        tag = ""
+        if speaker:
+            colour = SPEAKER_COLOURS[speakers.index(speaker) % len(SPEAKER_COLOURS)]
+            tag = speaker_tag(speaker, colour, look)
         events.append(
             f"Dialogue: 2,{span},Current,,0,0,0,,{{\\pos({WIDTH // 2},{HEIGHT // 2 + 40}){blur}}}"
-            f"{karaoke_line(line, shown_from, highlight, look)}"
+            f"{tag}{karaoke_line(line, shown_from, highlight, look)}"
         )
-        if speaker := line[0].speaker:
-            colour = SPEAKER_COLOURS[speakers.index(speaker) % len(SPEAKER_COLOURS)]
-            events.append(
-                f"Dialogue: 3,{span},Speaker,,0,0,0,,{{\\pos({WIDTH // 2},{HEIGHT // 2 - 30})"
-                f"\\3c{inline_colour(colour)}}}{ass_text(speaker.upper())}"
-            )
         if upcoming and style.upcoming:
             text = " ".join(ass_text(word.text) for word in upcoming)
             events.append(

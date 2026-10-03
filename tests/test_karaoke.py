@@ -97,7 +97,7 @@ def test_speakers_are_read_trimmed_and_blank_means_none() -> None:
     assert [word.speaker for word in parsed] == ["x" * karaoke.MAX_SPEAKER_CHARS, None]
 
 
-def test_each_speaker_gets_a_named_tag_in_their_own_colour() -> None:
+def test_each_speaker_line_starts_with_their_name_in_their_own_colour() -> None:
     timed = [
         Word("Run", 1, 1.5, 0, "Pip"),
         Word("Night", 4, 4.5, 1),
@@ -107,13 +107,13 @@ def test_each_speaker_gets_a_named_tag_in_their_own_colour() -> None:
 
     ass = karaoke.build_ass(timed, "", STYLE)
 
-    tags = [
-        line for line in ass.splitlines() if ",Speaker," in line and line.startswith("Dialogue:")
-    ]
+    lines = [line for line in ass.splitlines() if ",Current," in line]
     pip = karaoke.inline_colour(karaoke.SPEAKER_COLOURS[0])
     thomas = karaoke.inline_colour(karaoke.SPEAKER_COLOURS[1])
-    assert [tag.rsplit("}", 1)[1] for tag in tags] == ["PIP", "THOMAS", "PIP"]
-    assert [pip in tags[0], thomas in tags[1], pip in tags[2]] == [True, True, True]
+    assert f"{pip}}}PIP: " in lines[0]
+    assert "PIP" not in lines[1]
+    assert f"{thomas}}}THOMAS: " in lines[2]
+    assert f"{pip}}}PIP: " in lines[3]
 
 
 def test_a_new_speaker_starts_a_new_line() -> None:
