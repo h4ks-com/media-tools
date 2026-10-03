@@ -38,6 +38,8 @@ ADD --checksum=sha256:194018e6b2b293a7964f037b25c0249ce1418bc9ab3c971060a03aa578
 ADD --checksum=sha256:a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da --chmod=644 \
     "https://raw.githubusercontent.com/google/fonts/23e54b51ddff/ofl/notosanssc/NotoSansSC%5Bwght%5D.ttf" /tools/fonts/NotoSansSC.ttf
 COPY --chmod=644 fonts.conf /tools/fonts.conf
+# ADD creates the folders it fills as root-only, and the pod reads them as an unprivileged user.
+RUN chmod -R a+rX /tools
 
 
 FROM python:3.14-slim
