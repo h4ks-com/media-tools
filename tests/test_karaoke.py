@@ -86,6 +86,42 @@ def test_the_next_line_can_stay_hidden() -> None:
     assert [",Current," in event for event in events] == [True, True]
 
 
+def test_speakers_are_read_trimmed_and_blank_means_none() -> None:
+    raw = [
+        {"text": "a", "start": 0, "end": 1, "speaker": " " + "x" * 50},
+        {"text": "b", "start": 1, "end": 2, "speaker": ""},
+    ]
+
+    parsed = karaoke.parse_words(raw, 10)
+
+    assert [word.speaker for word in parsed] == ["x" * karaoke.MAX_SPEAKER_CHARS, None]
+
+
+def test_each_speaker_gets_a_named_tag_in_their_own_colour() -> None:
+    timed = [
+        Word("Run", 1, 1.5, 0, "Pip"),
+        Word("Night", 4, 4.5, 1),
+        Word("Stay", 7, 7.5, 2, "Thomas"),
+        Word("Now", 10, 10.5, 3, "Pip"),
+    ]
+
+    ass = karaoke.build_ass(timed, "", STYLE)
+
+    tags = [
+        line for line in ass.splitlines() if ",Speaker," in line and line.startswith("Dialogue:")
+    ]
+    pip = karaoke.inline_colour(karaoke.SPEAKER_COLOURS[0])
+    thomas = karaoke.inline_colour(karaoke.SPEAKER_COLOURS[1])
+    assert [tag.rsplit("}", 1)[1] for tag in tags] == ["PIP", "THOMAS", "PIP"]
+    assert [pip in tags[0], thomas in tags[1], pip in tags[2]] == [True, True, True]
+
+
+def test_a_new_speaker_starts_a_new_line() -> None:
+    timed = [Word("one", 0, 0.5, None, "A"), Word("two", 0.6, 1, None, "B")]
+
+    assert len(karaoke.group_by_pauses(timed)) == 2
+
+
 def test_text_cannot_start_a_new_subtitle_line() -> None:
     assert karaoke.ass_text("a\rDialogue: {x}\nb") == "a Dialogue: (x) b"
 

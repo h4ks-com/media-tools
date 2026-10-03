@@ -69,12 +69,25 @@ BACKGROUNDS: dict[Background, str] = {
 }
 
 
+# Tag colours for the speakers in order of first appearance, as ASS &HAABBGGRR.
+SPEAKER_COLOURS = (
+    "&H005F5AFF",
+    "&H00D8B400",
+    "&H0000A1F4",
+    "&H00E55D9B",
+    "&H00B5C42E",
+    "&H00B55BF1",
+)
+MAX_SPEAKER_CHARS = 40
+
+
 @dataclass(frozen=True)
 class Word:
     text: str
     start: float
     end: float
     line: int | None
+    speaker: str | None = None
 
 
 @dataclass(frozen=True)
@@ -112,7 +125,9 @@ class Picture:
 
 
 def parse_words(raw: object, limit: int) -> list[Word]:
-    """Read timed words from JSON: a list of {text, start, end, line}, where line may be missing.
+    """Read timed words from JSON: a list of {text, start, end, line, speaker}.
+
+    line and speaker may be missing; a speaker's name shows above the lines they say.
 
     :raises ValueError: when it is no list of 1 to `limit` words with 0 <= start <= end.
     """
@@ -128,7 +143,8 @@ def parse_words(raw: object, limit: int) -> list[Word]:
         if line is not None and not (isinstance(line, int) and line >= 0):
             raise ValueError("a word's line is a whole number from 0")
         text = str(item["text"])[:MAX_WORD_CHARS]
-        words.append(Word(text, start, end, line))
+        speaker = str(item.get("speaker") or "").strip()[:MAX_SPEAKER_CHARS] or None
+        words.append(Word(text, start, end, line, speaker))
     return sorted(words, key=lambda word: word.start)
 
 
@@ -168,7 +184,8 @@ def group_by_pauses(words: list[Word]) -> list[list[Word]]:
     current: list[Word] = []
     for word in words:
         pause = current and word.start - current[-1].end > LINE_GAP_SECONDS
-        if current and (pause or len(current) >= MAX_WORDS_PER_LINE):
+        new_speaker = current and word.speaker != current[-1].speaker
+        if current and (pause or new_speaker or len(current) >= MAX_WORDS_PER_LINE):
             lines.append(current)
             current = []
         current.append(word)
@@ -248,6 +265,8 @@ def ass_header(look: Look) -> str:
         ),
         style_line("Next", 44, "&H90FFFFFF,&H90FFFFFF", look.outline, "1,0,1,2,0,5,60,60,0,1"),
         style_line("Title", 34, "&H00FFFFFF,&H00FFFFFF", look.outline, "2,0,1,2,0,8,60,60,40,1"),
+        # Border style 3 draws the outline colour as a box behind the name.
+        style_line("Speaker", 30, "&H00FFFFFF,&H00FFFFFF", "&H00000000", "1,0,3,8,0,5,60,60,0,1"),
     ]
     lines = [
         "[Script Info]",
@@ -272,6 +291,7 @@ def build_ass(words: list[Word], title: str, style: Style) -> str:
     grouped = group_by_line(words) if all(word.line is not None for word in words) else None
     lines = [trim_lead_in(line) for line in grouped or group_by_pauses(words)]
     events = [f"Dialogue: 1,0:00:00.00,9:00:00.00,Title,,0,0,0,,{ass_text(title)}"] if title else []
+    speakers = list(dict.fromkeys(word.speaker for word in words if word.speaker))
     blur = f"\\blur{look.blur}" if look.blur else ""
     previous_end = 0.0
     for index, line in enumerate(lines):
@@ -286,6 +306,12 @@ def build_ass(words: list[Word], title: str, style: Style) -> str:
             f"Dialogue: 2,{span},Current,,0,0,0,,{{\\pos({WIDTH // 2},{HEIGHT // 2 + 40}){blur}}}"
             f"{karaoke_line(line, shown_from, highlight, look)}"
         )
+        if speaker := line[0].speaker:
+            colour = SPEAKER_COLOURS[speakers.index(speaker) % len(SPEAKER_COLOURS)]
+            events.append(
+                f"Dialogue: 3,{span},Speaker,,0,0,0,,{{\\pos({WIDTH // 2},{HEIGHT // 2 - 30})"
+                f"\\3c{inline_colour(colour)}}}{ass_text(speaker.upper())}"
+            )
         if upcoming and style.upcoming:
             text = " ".join(ass_text(word.text) for word in upcoming)
             events.append(
