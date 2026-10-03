@@ -57,8 +57,10 @@ COPY --from=builder /tools /opt/tools
 COPY --from=mwader/static-ffmpeg:9.0.2@sha256:7d9bdaaf887f7e6ce6151f67325c344074b5ff1fb75316011c3376503e449a7b \
     /ffmpeg /ffprobe /opt/tools/
 
-# We remove the base image's pip, since uv installs our packages and pip vendors a vulnerable msgpack.
-RUN /usr/local/bin/python -m pip uninstall --yes pip \
+# We take Debian's security fixes that landed after the base image was built, and remove the base
+# image's pip, since uv installs our packages and pip vendors a vulnerable msgpack.
+RUN apt-get update && apt-get upgrade --yes --no-install-recommends && rm -rf /var/lib/apt/lists/* \
+    && /usr/local/bin/python -m pip uninstall --yes pip \
     && groupadd --system --gid 1000 media && useradd --system --uid 1000 --gid media media
 
 USER 1000:1000
