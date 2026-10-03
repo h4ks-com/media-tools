@@ -462,6 +462,26 @@ def test_mix_bed_needs_two_files() -> None:
     assert post(f"/mix-bed?lengths={len(tone(1.0))}", tone(1.0))[0] == 400
 
 
+def test_mix_bed_takes_one_bed_per_start() -> None:
+    lengths, body = joined(tone(20.0), tone(1.0), tone(1.0))
+
+    assert post(f"/mix-bed?lengths={lengths}&bed_starts=0,10", body)[0] == 200
+    assert post(f"/mix-bed?lengths={lengths}&bed_starts=0", body)[0] == 400
+
+
+@pytest.mark.parametrize("starts", ["5,10", "0,x", "0,inf", "", ",".join(["0"] * 25)])
+def test_bed_starts_begin_at_zero_and_are_finite(starts: str) -> None:
+    lengths, body = joined(tone(20.0), tone(1.0), tone(1.0))
+
+    assert post(f"/mix-bed?lengths={lengths}&bed_starts={starts}", body)[0] == 400
+
+
+def test_beds_too_close_together_are_a_400() -> None:
+    lengths, body = joined(tone(20.0), tone(1.0), tone(1.0))
+
+    assert post(f"/mix-bed?lengths={lengths}&bed_starts=0,1", body)[0] == 400
+
+
 def test_the_mp3_takes_audio_chapters_and_a_cover() -> None:
     chapters = json.dumps([{"title": "One", "start": 0}]).encode()
     lengths, body = joined(tone(1.0), chapters, png((32, 32)))

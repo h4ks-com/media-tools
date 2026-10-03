@@ -46,6 +46,7 @@ MAX_MEDIA_BYTES = 300 * 1024 * 1024
 MAX_WORDS = 20_000
 MAX_KARAOKE_PICTURES = 24
 MAX_CHAPTERS = 100
+MAX_BEDS = 24
 MAX_TEXT_CHARS = 120
 GLTFPACK = os.environ.get("GLTFPACK", "/opt/tools/gltfpack")
 COVER_FONT = Path(karaoke.FONTS_DIR) / "LilitaOne-Regular.ttf"
@@ -313,15 +314,39 @@ async def convert_audio(
     return named_file(data, f"audio.{format}")
 
 
+def parsed_bed_starts(starts: str) -> list[float]:
+    try:
+        values = [float(value) for value in starts.split(",") if value]
+    except ValueError as error:
+        raise HTTPException(400, "bed_starts is a comma separated list of seconds") from error
+    if (
+        not values
+        or values[0] != 0
+        or len(values) > MAX_BEDS
+        or not all(map(math.isfinite, values))
+    ):
+        raise HTTPException(400, f"give 1 to {MAX_BEDS} bed_starts in seconds, the first at 0")
+    return values
+
+
 @app.post("/mix-bed")
 async def mix_bed(
-    request: Request, lengths: str, bed_volume: Annotated[float, Query(gt=0, le=1)] = 0.3
+    request: Request,
+    lengths: str,
+    bed_volume: Annotated[float, Query(gt=0, le=1)] = 0.3,
+    bed_starts: str = "0",
 ) -> Response:
-    """Take the spoken track then the music, and lay the voices over the music."""
+    """Take the spoken track then one music bed per start, and lay the voices over the music."""
+    starts = parsed_bed_starts(bed_starts)
     with heavy_turn():
         body = await read_body(request, MAX_MEDIA_BYTES)
-        voice, bed = split_body(body, lengths, range(2, 3))
-        data = await run_media(lambda: audio.mix_bed(voice, bed, bed_volume, TIMEOUT_SECONDS))
+        voice, *beds = split_body(body, lengths, range(len(starts) + 1, len(starts) + 2))
+        try:
+            data = await run_media(
+                lambda: audio.mix_bed(voice, beds, starts, bed_volume, TIMEOUT_SECONDS)
+            )
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
     return named_file(data, "mixed.wav")
 
 

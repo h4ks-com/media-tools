@@ -40,12 +40,37 @@ def test_convert_refuses_what_is_no_audio() -> None:
 
 def test_the_bed_plays_before_and_after_the_voices(tmp_path: Path) -> None:
     path = tmp_path / "mixed.wav"
-    path.write_bytes(audio.mix_bed(tone(2.0), tone(3.0, rate=44100), 0.3, 60))
+    path.write_bytes(audio.mix_bed(tone(2.0), [tone(3.0, rate=44100)], [0], 0.3, 60))
 
     facts = ffmpeg.probe(path, 60)
 
     assert facts.sample_rate == 22050
     assert facts.seconds == pytest.approx(2.0 + 2 * audio.BED_PADDING_SECONDS, abs=0.1)
+
+
+def test_later_beds_cross_fade_in_and_keep_the_length(tmp_path: Path) -> None:
+    path = tmp_path / "mixed.wav"
+    path.write_bytes(audio.mix_bed(tone(20.0), [tone(3.0), tone(2.0)], [0, 10], 0.3, 60))
+
+    assert ffmpeg.probe(path, 60).seconds == pytest.approx(
+        20.0 + 2 * audio.BED_PADDING_SECONDS, abs=0.1
+    )
+
+
+def test_each_bed_plays_until_the_next_starts_with_the_fades_counted() -> None:
+    fade, padding = audio.BED_CROSSFADE_SECONDS, audio.BED_PADDING_SECONDS
+
+    sections = audio.bed_sections(60, [0, 20, 45])
+
+    assert sections == [20 + padding, 25 + fade, 15 + fade + padding]
+    assert sum(sections) - 2 * fade == 60 + 2 * padding
+
+
+def test_beds_cannot_start_too_close_together_or_after_the_voices() -> None:
+    with pytest.raises(ValueError, match="at least"):
+        audio.bed_sections(60, [0, 2])
+    with pytest.raises(ValueError, match="at least"):
+        audio.bed_sections(60, [0, 58])
 
 
 def test_metadata_escapes_tags_and_closes_the_last_chapter_at_the_end() -> None:

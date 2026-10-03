@@ -16,6 +16,7 @@ CODECS: dict[AudioFormat, list[str]] = {
     "mp3": ["-c:a", "libmp3lame", "-b:a", "320k"],
 }
 BED_PADDING_SECONDS = 8
+BED_CROSSFADE_SECONDS = 3
 COVER_ART_SIZE = 600
 
 
@@ -48,34 +49,79 @@ def convert(
         return target.read_bytes()
 
 
-def bed_mix_graph(seconds: float, rate: int, bed_volume: float) -> str:
-    """Lay voices over a looping bed that ducks under speech, with 8 s of music around them."""
+def bed_sections(seconds: float, bed_starts: list[float]) -> list[float]:
+    """Say how long each bed plays, the first from the start and each later one from its start.
+
+    Each later bed starts BED_CROSSFADE_SECONDS early and fades in over the bed before it, so the
+    new music is in full when the voices reach its start.
+
+    :raises ValueError: when a bed would start too close to the one before or after the voices end.
+    """
+    ends = [*bed_starts[1:], seconds]
+    gaps = [end - start for start, end in zip(bed_starts, ends, strict=True)]
+    if len(bed_starts) > 1 and min(gaps) < 2 * BED_CROSSFADE_SECONDS:
+        raise ValueError(
+            f"start each bed at least {2 * BED_CROSSFADE_SECONDS} s after the one before "
+            "and before the voices end"
+        )
+    sections = [gap + BED_CROSSFADE_SECONDS for gap in gaps]
+    sections[0] += BED_PADDING_SECONDS - BED_CROSSFADE_SECONDS
+    sections[-1] += BED_PADDING_SECONDS
+    return sections
+
+
+def bed_mix_graph(seconds: float, rate: int, bed_volume: float, bed_starts: list[float]) -> str:
+    """Lay voices over looping beds that cross-fade at their starts and duck under speech.
+
+    Music plays alone for 8 s before and after the voices.
+    """
     total = seconds + 2 * BED_PADDING_SECONDS
-    return (
-        f"[0:a]aresample={rate},aformat=channel_layouts=stereo,"
-        f"adelay={BED_PADDING_SECONDS}s:all=1,apad=pad_dur={BED_PADDING_SECONDS},asplit[voice][key];"
-        f"[1:a]aresample={rate},aformat=channel_layouts=stereo,"
-        f"aloop=loop=-1:size=2147483647,volume={bed_volume}[bed];"
-        "[bed][key]sidechaincompress=threshold=0.015:ratio=8:attack=150:release=1500[ducked];"
-        f"[ducked]afade=t=in:d=2,afade=t=out:st={total - 4:.3f}:d=4[music];"
-        "[voice][music]amix=inputs=2:normalize=0:duration=first[out]"
-    )
+    stereo = f"aresample={rate},aformat=channel_layouts=stereo"
+    graph = [
+        f"[0:a]{stereo},adelay={BED_PADDING_SECONDS}s:all=1,"
+        f"apad=pad_dur={BED_PADDING_SECONDS},asplit[voice][key]"
+    ]
+    for index, length in enumerate(bed_sections(seconds, bed_starts), start=1):
+        graph.append(
+            f"[{index}:a]{stereo},aloop=loop=-1:size=2147483647,"
+            f"atrim=duration={length:.3f},asetpts=PTS-STARTPTS[section{index}]"
+        )
+    joined = "section1"
+    for index in range(2, len(bed_starts) + 1):
+        graph.append(
+            f"[{joined}][section{index}]acrossfade=d={BED_CROSSFADE_SECONDS}[joined{index}]"
+        )
+        joined = f"joined{index}"
+    graph += [
+        f"[{joined}]volume={bed_volume}[bed]",
+        "[bed][key]sidechaincompress=threshold=0.015:ratio=8:attack=150:release=1500[ducked]",
+        f"[ducked]afade=t=in:d=2,afade=t=out:st={total - 4:.3f}:d=4[music]",
+        "[voice][music]amix=inputs=2:normalize=0:duration=first[out]",
+    ]
+    return ";".join(graph)
 
 
-def mix_bed(voice: bytes, bed: bytes, bed_volume: float, timeout: float) -> bytes:
-    """Lay the voices over the bed at that volume; answer with a stereo WAV at the voices' rate.
+def mix_bed(
+    voice: bytes, beds: list[bytes], bed_starts: list[float], bed_volume: float, timeout: float
+) -> bytes:
+    """Lay the voices over the beds at that volume, each bed from its start in the voices' seconds.
+
+    Answers with a stereo WAV at the voices' rate.
 
     :raises FfmpegError: when ffmpeg cannot read the tracks.
+    :raises ValueError: when the beds start too close together or after the voices end.
     """
     with tempfile.TemporaryDirectory() as workdir:
-        voice_path, bed_path = Path(workdir) / "voice", Path(workdir) / "bed"
-        target = Path(workdir) / "mixed.wav"
+        voice_path, target = Path(workdir) / "voice", Path(workdir) / "mixed.wav"
         voice_path.write_bytes(voice)
-        bed_path.write_bytes(bed)
         facts = ffmpeg.probe(voice_path, timeout)
-        arguments = [*ffmpeg.AUDIO_GUARD, "-i", str(voice_path), *ffmpeg.AUDIO_GUARD]
-        arguments += ["-i", str(bed_path), "-filter_complex"]
-        arguments += [bed_mix_graph(facts.seconds, facts.sample_rate, bed_volume), "-map", "[out]"]
+        graph = bed_mix_graph(facts.seconds, facts.sample_rate, bed_volume, bed_starts)
+        arguments = [*ffmpeg.AUDIO_GUARD, "-i", str(voice_path)]
+        for index, bed in enumerate(beds):
+            bed_path = Path(workdir) / f"bed{index}"
+            bed_path.write_bytes(bed)
+            arguments += [*ffmpeg.AUDIO_GUARD, "-i", str(bed_path)]
+        arguments += ["-filter_complex", graph, "-map", "[out]"]
         ffmpeg.run([*arguments, "-c:a", "pcm_s16le", "-y", str(target)], timeout)
         return target.read_bytes()
 
