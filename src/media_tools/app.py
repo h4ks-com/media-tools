@@ -382,6 +382,7 @@ class KaraokeOptions(BaseModel):
     title: str = Field("", max_length=MAX_TEXT_CHARS)
     picture_starts: str = ""
     upcoming: bool = True
+    zoom: bool = False
 
 
 @app.post("/karaoke")
@@ -389,7 +390,9 @@ async def render_karaoke(request: Request, options: Annotated[KaraokeOptions, Qu
     """Take the track, the words JSON, the vocal stem when vocals_cut is set, then the pictures."""
     seconds = picture_starts(options.picture_starts)
     stems = 1 if options.vocals_cut > 0 else 0
-    style = karaoke.Style(options.look, options.highlight, options.background, options.upcoming)
+    style = karaoke.Style(
+        options.look, options.highlight, options.background, options.upcoming, options.zoom
+    )
     with heavy_turn():
         body = await read_body(request, MAX_MEDIA_BYTES)
         count = 2 + stems + len(seconds)

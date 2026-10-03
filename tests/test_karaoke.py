@@ -146,10 +146,24 @@ def test_vocals_are_cut_from_the_track_only_when_asked() -> None:
 
 
 def test_each_picture_lasts_until_the_next_starts() -> None:
-    inputs = karaoke.slideshow_inputs([Path("a"), Path("b")], [3.0, 10.0], 25.0)
+    seconds = karaoke.picture_seconds([3.0, 10.0], 25.0)
+    inputs = karaoke.slideshow_inputs([Path("a"), Path("b")], seconds)
 
     durations = [inputs[index + 1] for index, value in enumerate(inputs) if value == "-t"]
     assert durations == ["10.000", "15.000"]
+
+
+def test_the_zoom_is_slow_capped_and_alternates() -> None:
+    short = karaoke.zoom_filter(0, 10.0)
+    long = karaoke.zoom_filter(1, 120.0)
+
+    assert "z='1+0.0400*min(on/149,1)'" in short
+    assert "z='1+0.1000*(1-min(on/1799,1))'" in long
+
+
+def test_still_pictures_have_no_zoom() -> None:
+    assert "zoompan" not in karaoke.slideshow_graph(1, [5.0], Path("a.ass"), zoom=False)
+    assert "zoompan" in karaoke.slideshow_graph(1, [5.0], Path("a.ass"), zoom=True)
 
 
 def video_facts(data: bytes, tmp_path: Path) -> list[dict[str, str | int]]:
@@ -184,5 +198,15 @@ def test_karaoke_renders_over_pictures_with_the_vocals_cut(tmp_path: Path) -> No
     shown = [karaoke.Picture(png((64, 48)), 0), karaoke.Picture(png((48, 64)), 1.0)]
 
     video = karaoke.render(song, STYLE, shown, 120)
+
+    assert video_facts(video, tmp_path)[0] == {"codec_type": "video", "width": karaoke.WIDTH}
+
+
+@needs_libass
+def test_karaoke_zooms_the_pictures(tmp_path: Path) -> None:
+    song = karaoke.Song(tone(2.0), words(("la", 0.2, 1.0, 0)), "", None)
+    shown = [karaoke.Picture(png((64, 48)), 0), karaoke.Picture(png((48, 64)), 1.0)]
+
+    video = karaoke.render(song, karaoke.Style("classic", "sweep", "bars", zoom=True), shown, 120)
 
     assert video_facts(video, tmp_path)[0] == {"codec_type": "video", "width": karaoke.WIDTH}

@@ -118,6 +118,7 @@ jobs:
               (f"/mp3?lengths={lengths(audio, chapters, png)}", audio + chapters + png),
               (f"/karaoke?lengths={lengths(audio, words)}", audio + words),
               (f"/karaoke?lengths={lengths(audio, words, png)}&picture_starts=0", audio + words + png),
+              (f"/karaoke?lengths={lengths(audio, words, png)}&picture_starts=0&zoom=true", audio + words + png),
           ):
               with urllib.request.urlopen(urllib.request.Request(BASE + path, data=body), timeout=600) as response:
                   print(path.split("?")[0], response.status)

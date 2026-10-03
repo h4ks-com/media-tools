@@ -29,6 +29,11 @@ LINGER_SECONDS = 2.0
 FIRST_WORD_MAX_SECONDS = 1.0
 MAX_WORD_CHARS = 60
 PICTURE_FADE_SECONDS = 0.8
+# A slow zoom stays unnoticed as motion and never crops much of the picture: at most this much per
+# second and in total. We zoom on a picture twice the frame size so the steps stay below a pixel.
+ZOOM_PER_SECOND = 0.004
+MAX_ZOOM = 0.1
+ZOOM_SUPERSAMPLE = 2
 
 
 @dataclass(frozen=True)
@@ -92,12 +97,17 @@ class Word:
 
 @dataclass(frozen=True)
 class Style:
-    """How the words look; `upcoming` also shows the next line under the one being sung."""
+    """How the video looks.
+
+    `upcoming` also shows the next line under the one being sung, and `zoom` slowly zooms the
+    pictures, in and out by turns.
+    """
 
     look: LookName
     highlight: Highlight
     background: Background
     upcoming: bool = True
+    zoom: bool = False
 
 
 @dataclass(frozen=True)
@@ -346,24 +356,44 @@ def visualizer_graph(style: Style, ass_path: Path, track: str) -> str:
     )
 
 
-def slideshow_inputs(paths: list[Path], starts: list[float], duration: float) -> list[str]:
+def picture_seconds(starts: list[float], duration: float) -> list[float]:
+    """Say how long each picture shows: the first from 0, each until the next one starts."""
+    ends = [*starts[1:], duration]
+    return [max(1.0, end - (0 if index == 0 else starts[index])) for index, end in enumerate(ends)]
+
+
+def slideshow_inputs(paths: list[Path], seconds: list[float]) -> list[str]:
     inputs: list[str] = []
-    for index, path in enumerate(paths):
-        until = starts[index + 1] if index + 1 < len(starts) else duration
-        seconds = max(1.0, until - (0 if index == 0 else starts[index]))
+    for path, shown in zip(paths, seconds, strict=True):
         inputs += [*ffmpeg.PICTURE_GUARD, "-loop", "1", "-framerate", str(SLIDESHOW_FPS)]
-        inputs += ["-t", f"{seconds:.3f}", "-i", str(path)]
+        inputs += ["-t", f"{shown:.3f}", "-i", str(path)]
     return inputs
 
 
-def slideshow_graph(first_input: int, count: int, ass_path: Path) -> str:
-    """Show the pictures in turn, each fading in, with the words over them."""
+def zoom_filter(index: int, seconds: float) -> str:
+    """Zoom a picture slowly over the time it shows, in on even pictures and out on odd ones."""
+    depth = min(MAX_ZOOM, ZOOM_PER_SECOND * seconds)
+    frames = max(1, round(seconds * SLIDESHOW_FPS) - 1)
+    progress = f"min(on/{frames},1)" if index % 2 == 0 else f"(1-min(on/{frames},1))"
+    big_width, big_height = WIDTH * ZOOM_SUPERSAMPLE, HEIGHT * ZOOM_SUPERSAMPLE
+    return (
+        f"scale={big_width}:{big_height}:force_original_aspect_ratio=increase,"
+        f"crop={big_width}:{big_height},zoompan=z='1+{depth:.4f}*{progress}'"
+        ":x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+        f":d=1:s={WIDTH}x{HEIGHT}:fps={SLIDESHOW_FPS}"
+    )
+
+
+def slideshow_graph(first_input: int, seconds: list[float], ass_path: Path, zoom: bool) -> str:
+    """Show the pictures in turn, each fading in and zooming when asked, under the words."""
+    still = f"scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,crop={WIDTH}:{HEIGHT}"
     chains = [
-        f"[{first_input + index}:v]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
-        f"crop={WIDTH}:{HEIGHT},setsar=1,fps={SLIDESHOW_FPS},format=yuv420p,"
+        f"[{first_input + index}:v]{zoom_filter(index, shown) if zoom else still},"
+        f"setsar=1,fps={SLIDESHOW_FPS},format=yuv420p,"
         f"fade=t=in:st=0:d={PICTURE_FADE_SECONDS}[picture{index}]"
-        for index in range(count)
+        for index, shown in enumerate(seconds)
     ]
+    count = len(seconds)
     labels = "".join(f"[picture{index}]" for index in range(count))
     return (
         ";".join(chains)
@@ -394,11 +424,12 @@ def render(song: Song, style: Style, pictures: list[Picture], timeout: float) ->
             for path, picture in zip(paths, pictures, strict=True):
                 path.write_bytes(picture.data)
             duration = ffmpeg.probe(folder / "audio", timeout).seconds
-            starts = [picture.start for picture in pictures]
-            inputs += slideshow_inputs(paths, starts, duration)
+            seconds = picture_seconds([picture.start for picture in pictures], duration)
+            inputs += slideshow_inputs(paths, seconds)
             graph = track + "[heard]anullsink;"
-            graph += slideshow_graph(2 if vocals else 1, len(pictures), ass_path)
-            video = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-tune", "stillimage"]
+            graph += slideshow_graph(2 if vocals else 1, seconds, ass_path, style.zoom)
+            tune = [] if style.zoom else ["-tune", "stillimage"]
+            video = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", *tune]
         else:
             graph = visualizer_graph(style, ass_path, track)
             video = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
