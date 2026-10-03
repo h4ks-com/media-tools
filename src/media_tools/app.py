@@ -4,6 +4,7 @@ Each POST takes raw file bytes as its body, since n8n sends one binary body per 
 files go back to back with their byte lengths in the `lengths` query.
 """
 
+import json
 import os
 import threading
 from collections.abc import Callable
@@ -18,11 +19,17 @@ from fastapi import Query
 from fastapi import Request
 from fastapi.responses import PlainTextResponse
 from fastapi.responses import Response
+from pydantic import BaseModel
+from pydantic import Field
 from starlette.concurrency import run_in_threadpool
 
+from media_tools import audio
+from media_tools import karaoke
 from media_tools import mesh
 from media_tools import pictures
 from media_tools import poses
+from media_tools.cover import cover
+from media_tools.ffmpeg import FfmpegError
 from media_tools.glb import GlbError
 from media_tools.retarget import RetargetError
 from media_tools.retarget import retarget
@@ -33,10 +40,24 @@ MAX_MOTION_BYTES = 5 * 1024 * 1024
 MAX_FRAMES = 16
 MAX_CLIPS = 8
 MAX_LIBRARY_CLIPS = 24
+MAX_AUDIO_BYTES = 300 * 1024 * 1024
+MAX_WORDS = 20_000
+MAX_KARAOKE_PICTURES = 24
+MAX_CHAPTERS = 100
+MAX_TEXT_CHARS = 120
 GLTFPACK = os.environ.get("GLTFPACK", "/opt/tools/gltfpack")
+COVER_FONT = Path(karaoke.FONTS_DIR) / "LilitaOne-Regular.ttf"
 TIMEOUT_SECONDS = float(os.environ.get("TIMEOUT_SECONDS", "600"))
 MAX_IN_FLIGHT = 4
-MEDIA_TYPES = {"png": "image/png", "gif": "image/gif", "glb": "model/gltf-binary"}
+MEDIA_TYPES = {
+    "png": "image/png",
+    "gif": "image/gif",
+    "glb": "model/gltf-binary",
+    "wav": "audio/wav",
+    "flac": "audio/flac",
+    "mp3": "audio/mpeg",
+    "mp4": "video/mp4",
+}
 LIBRARY = {path.stem: path for path in sorted((Path(__file__).parent / "library").glob("*.glb"))}
 FRIENDLY_NAMES = {
     "Idle_Loop": "Idle",
@@ -267,3 +288,137 @@ async def retarget_motions(
         except RetargetError as error:
             raise HTTPException(422, f"cannot retarget: {error}") from error
     return named_file(glb, "model.glb")
+
+
+async def run_media[T](work: Callable[[], T]) -> T:
+    """Run an ffmpeg job in the heavy slot, answering 422 when ffmpeg cannot handle the files."""
+    try:
+        return await run_in_threadpool(in_slot, work)
+    except FfmpegError as error:
+        raise HTTPException(422, str(error)) from error
+
+
+@app.post("/convert")
+async def convert_audio(
+    request: Request,
+    format: audio.AudioFormat = "wav",
+    ar: Annotated[int | None, Query(ge=8000, le=192_000)] = None,
+    ac: Annotated[int | None, Query(ge=1, le=8)] = None,
+) -> Response:
+    with heavy_turn():
+        track = await read_body(request, MAX_AUDIO_BYTES)
+        data = await run_media(lambda: audio.convert(track, format, ar, ac, TIMEOUT_SECONDS))
+    return named_file(data, f"audio.{format}")
+
+
+@app.post("/mix-bed")
+async def mix_bed(request: Request, lengths: str) -> Response:
+    """Take the spoken track then the music, and lay the voices over the music."""
+    with heavy_turn():
+        body = await read_body(request, 2 * MAX_AUDIO_BYTES)
+        voice, bed = split_body(body, lengths, range(2, 3))
+        data = await run_media(lambda: audio.mix_bed(voice, bed, TIMEOUT_SECONDS))
+    return named_file(data, "mixed.wav")
+
+
+def picture_starts(starts: str) -> list[float]:
+    try:
+        values = [float(value) for value in starts.split(",") if value]
+    except ValueError as error:
+        raise HTTPException(400, "picture_starts is a comma separated list of seconds") from error
+    if len(values) > MAX_KARAOKE_PICTURES or values != sorted(values) or any(v < 0 for v in values):
+        raise HTTPException(
+            400, f"give at most {MAX_KARAOKE_PICTURES} ascending picture_starts in seconds"
+        )
+    return values
+
+
+def parsed_words(data: bytes) -> list[karaoke.Word]:
+    try:
+        return karaoke.parse_words(json.loads(data), MAX_WORDS)
+    except (ValueError, KeyError, TypeError) as error:
+        raise HTTPException(400, f"words: {error}") from error
+
+
+class KaraokeOptions(BaseModel):
+    lengths: str
+    look: karaoke.LookName = "neon"
+    highlight: karaoke.Highlight = "sweep"
+    background: karaoke.Background = "bars"
+    vocals_cut: float = Field(0, ge=0, le=1)
+    title: str = Field("", max_length=MAX_TEXT_CHARS)
+    picture_starts: str = ""
+
+
+@app.post("/karaoke")
+async def render_karaoke(request: Request, options: Annotated[KaraokeOptions, Query()]) -> Response:
+    """Take the track, the words JSON, the vocal stem when vocals_cut is set, then the pictures."""
+    seconds = picture_starts(options.picture_starts)
+    stems = 1 if options.vocals_cut > 0 else 0
+    style = karaoke.Style(options.look, options.highlight, options.background)
+    with heavy_turn():
+        body = await read_body(
+            request, (2 + stems) * MAX_AUDIO_BYTES + len(seconds) * MAX_PICTURE_BYTES
+        )
+        count = 2 + stems + len(seconds)
+        parts = split_body(body, options.lengths, range(count, count + 1))
+        vocals = karaoke.Vocals(parts[2], options.vocals_cut) if stems else None
+        song = karaoke.Song(parts[0], parsed_words(parts[1]), options.title, vocals)
+        shown = [
+            karaoke.Picture(data, start)
+            for data, start in zip(parts[2 + stems :], seconds, strict=True)
+        ]
+        data = await run_media(lambda: karaoke.render(song, style, shown, TIMEOUT_SECONDS))
+    return named_file(data, "karaoke.mp4")
+
+
+@app.post("/cover")
+async def cover_title(
+    request: Request,
+    title: Annotated[str, Query(min_length=1, max_length=MAX_TEXT_CHARS)],
+    subtitle: Annotated[str, Query(max_length=MAX_TEXT_CHARS)] = "",
+) -> Response:
+    with heavy_turn():
+        picture = await read_body(request, MAX_PICTURE_BYTES)
+        try:
+            png = await run_in_threadpool(
+                in_slot, lambda: cover(picture, title, subtitle, COVER_FONT)
+            )
+        except pictures.PictureError as error:
+            raise HTTPException(400, str(error)) from error
+    return named_file(png, "cover.png")
+
+
+def parsed_chapters(data: bytes) -> list[audio.Chapter]:
+    try:
+        raw = json.loads(data)
+        if not isinstance(raw, list) or len(raw) > MAX_CHAPTERS:
+            raise ValueError(f"send a list of at most {MAX_CHAPTERS} chapters")
+        chapters = [
+            audio.Chapter(str(item["title"])[:MAX_TEXT_CHARS], float(item["start"])) for item in raw
+        ]
+    except (ValueError, KeyError, TypeError) as error:
+        raise HTTPException(400, f"chapters: {error}") from error
+    if any(chapter.start < 0 for chapter in chapters):
+        raise HTTPException(400, "chapters start at 0 seconds or later")
+    return sorted(chapters, key=lambda chapter: chapter.start)
+
+
+@app.post("/mp3")
+async def package_mp3(
+    request: Request,
+    lengths: str,
+    title: Annotated[str, Query(max_length=MAX_TEXT_CHARS)] = "",
+    artist: Annotated[str, Query(max_length=MAX_TEXT_CHARS)] = "",
+) -> Response:
+    """Take the audio, the chapters JSON and optionally the cover picture."""
+    with heavy_turn():
+        body = await read_body(request, MAX_AUDIO_BYTES + MAX_PICTURE_BYTES + MAX_PICTURE_BYTES)
+        track, chapter_list, *art = split_body(body, lengths, range(2, 4))
+        chapters = parsed_chapters(chapter_list)
+        tags = audio.BookTags(title, artist)
+        cover_art = art[0] if art else None
+        data = await run_media(
+            lambda: audio.package_mp3(track, chapters, cover_art, tags, TIMEOUT_SECONDS)
+        )
+    return named_file(data, "audiobook.mp3")

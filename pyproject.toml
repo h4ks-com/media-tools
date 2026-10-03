@@ -1,7 +1,7 @@
 [project]
 name = "media-tools"
 version = "0.0.0"
-description = "Internal picture and model tools for h4ks n8n workflows"
+description = "Internal picture, audio, video and model tools for h4ks n8n workflows"
 readme = "README.md"
 requires-python = ">=3.14"
 dependencies = [
@@ -11,6 +11,7 @@ dependencies = [
     "numpy==2.5.3",
     "pillow==12.3.0",
     "onnxruntime==1.30.0",
+    "pydantic==2.13.5",
 ]
 
 [dependency-groups]

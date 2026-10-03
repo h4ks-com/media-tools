@@ -20,6 +20,8 @@ jobs:
       - uses: astral-sh/setup-uv@v5
         with:
           enable-cache: true
+      # The karaoke tests render real video, which needs an ffmpeg built with libass.
+      - run: sudo apt-get update && sudo apt-get install --yes --no-install-recommends ffmpeg
       - run: uv sync
       - run: make quality
 
@@ -62,9 +64,11 @@ jobs:
           docker run -d --name smoke --user 1000:1000 --read-only --tmpfs /tmp --network none "$CANDIDATE"
           docker exec -i smoke python - <<'EOF'
           import io
+          import json
           import struct
           import time
           import urllib.request
+          import wave
 
           from PIL import Image
 
@@ -97,6 +101,26 @@ jobs:
                   print(path, response.status)
           with urllib.request.urlopen(f"{BASE}/library", timeout=10) as response:
               assert b"Jog_Fwd_Loop" in response.read()
+          sound = io.BytesIO()
+          with wave.open(sound, "wb") as track:
+              track.setnchannels(1)
+              track.setsampwidth(2)
+              track.setframerate(22050)
+              track.writeframes(b"\x00\x10" * 22050)
+          audio, png = sound.getvalue(), picture.getvalue()
+          words = json.dumps([{"text": "la", "start": 0.2, "end": 0.8, "line": 0}]).encode()
+          chapters = json.dumps([{"title": "One", "start": 0}]).encode()
+          lengths = lambda *files: ",".join(str(len(data)) for data in files)
+          for path, body in (
+              ("/convert?format=mp3", audio),
+              (f"/mix-bed?lengths={lengths(audio, audio)}", audio + audio),
+              ("/cover?title=Smoke+Test", png),
+              (f"/mp3?lengths={lengths(audio, chapters, png)}", audio + chapters + png),
+              (f"/karaoke?lengths={lengths(audio, words)}", audio + words),
+              (f"/karaoke?lengths={lengths(audio, words, png)}&picture_starts=0", audio + words + png),
+          ):
+              with urllib.request.urlopen(urllib.request.Request(BASE + path, data=body), timeout=600) as response:
+                  print(path.split("?")[0], response.status)
           EOF
       - if: failure()
         run: docker logs smoke

@@ -1,8 +1,10 @@
 import io
+import json
 import math
 import struct
 import zlib
 from collections.abc import Callable
+from pathlib import Path
 
 import numpy
 import pytest
@@ -11,7 +13,9 @@ from PIL import Image
 
 from conftest import edit
 from conftest import glb_with_json
+from conftest import needs_libass
 from conftest import png
+from conftest import tone
 from conftest import vroid_rig
 from media_tools import app as app_module
 from media_tools import mesh
@@ -424,3 +428,98 @@ def test_retarget_onto_an_unrigged_model_is_a_422(walk: bytes) -> None:
 
     assert status == 422
     assert b"rig it first" in body
+
+
+def joined(*files: bytes) -> tuple[str, bytes]:
+    return ",".join(str(len(data)) for data in files), b"".join(files)
+
+
+def test_convert_answers_with_the_asked_format() -> None:
+    status, body = post("/convert?format=flac&ar=16000&ac=1", tone(0.5))
+
+    assert (status, body[:4]) == (200, b"fLaC")
+
+
+def test_converting_no_audio_is_a_422() -> None:
+    assert post("/convert", b"not audio")[0] == 422
+
+
+def test_mix_bed_takes_the_voice_then_the_music() -> None:
+    lengths, body = joined(tone(1.0), tone(1.0))
+
+    status, mixed = post(f"/mix-bed?lengths={lengths}", body)
+
+    assert (status, mixed[:4]) == (200, b"RIFF")
+
+
+def test_mix_bed_needs_two_files() -> None:
+    assert post(f"/mix-bed?lengths={len(tone(1.0))}", tone(1.0))[0] == 400
+
+
+def test_the_mp3_takes_audio_chapters_and_a_cover() -> None:
+    chapters = json.dumps([{"title": "One", "start": 0}]).encode()
+    lengths, body = joined(tone(1.0), chapters, png((32, 32)))
+
+    status, mp3 = post(f"/mp3?lengths={lengths}&title=Book&artist=h4ks", body)
+
+    assert (status, mp3[:3]) == (200, b"ID3")
+
+
+@pytest.mark.parametrize(
+    "chapters",
+    [b"not json", b'{"title": "One"}', b'[{"title": "One"}]', b'[{"title": "One", "start": -1}]'],
+)
+def test_bad_chapters_are_a_400(chapters: bytes) -> None:
+    lengths, body = joined(tone(1.0), chapters)
+
+    assert post(f"/mp3?lengths={lengths}", body)[0] == 400
+
+
+def test_the_cover_route_sets_the_title(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        app_module, "COVER_FONT", Path(__file__).parent / "data" / "LilitaOne-Regular.ttf"
+    )
+
+    status, body = post("/cover?title=Fog&subtitle=h4ks", png((64, 64)))
+
+    assert status == 200
+    assert Image.open(io.BytesIO(body)).size == (1024, 1024)
+
+
+def test_a_cover_of_no_picture_is_a_400() -> None:
+    assert post("/cover?title=Fog", b"nope")[0] == 400
+
+
+@pytest.mark.parametrize(
+    ("query", "files"),
+    [
+        ("picture_starts=5,1", 3),
+        ("picture_starts=a", 3),
+        ("vocals_cut=0.5", 2),
+        ("", 3),
+    ],
+)
+def test_karaoke_parts_must_match_the_query(query: str, files: int) -> None:
+    words = json.dumps([{"text": "la", "start": 0, "end": 1}]).encode()
+    parts = [tone(1.0), words, png((32, 32))][:files]
+    lengths, body = joined(*parts)
+
+    assert post(f"/karaoke?lengths={lengths}&{query}", body)[0] == 400
+
+
+def test_karaoke_refuses_bad_words() -> None:
+    lengths, body = joined(tone(1.0), b'[{"text": "la"}]')
+
+    status, message = post(f"/karaoke?lengths={lengths}", body)
+
+    assert (status, message.startswith(b"words:")) == (400, True)
+
+
+@needs_libass
+def test_karaoke_renders_over_pictures() -> None:
+    words = json.dumps([{"text": "la", "start": 0.2, "end": 0.8, "line": 0}]).encode()
+    lengths, body = joined(tone(1.0), words, png((32, 32)))
+
+    status, video = post(f"/karaoke?lengths={lengths}&picture_starts=0&look=ocean", body)
+
+    assert (status, video[4:8]) == (200, b"ftyp")

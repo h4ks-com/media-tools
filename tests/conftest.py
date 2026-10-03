@@ -1,11 +1,17 @@
 import copy
 import io
+import math
+import shutil
+import struct
+import subprocess
+import wave
 from collections.abc import Callable
 from pathlib import Path
 
 import pytest
 from PIL import Image
 
+from media_tools import ffmpeg
 from media_tools.glb import CHUNK
 from media_tools.glb import GLB_MAGIC
 from media_tools.glb import HEADER
@@ -93,3 +99,38 @@ def png(size: tuple[int, int], box: tuple[int, int, int, int] | None = None) -> 
     output = io.BytesIO()
     picture.save(output, format="PNG")
     return output.getvalue()
+
+
+def tone(seconds: float, rate: int = 22050) -> bytes:
+    """Return a mono 16-bit WAV of a 440 Hz tone."""
+    output = io.BytesIO()
+    with wave.open(output, "wb") as track:
+        track.setnchannels(1)
+        track.setsampwidth(2)
+        track.setframerate(rate)
+        samples = (
+            round(8000 * math.sin(2 * math.pi * 440 * n / rate)) for n in range(int(seconds * rate))
+        )
+        track.writeframes(b"".join(struct.pack("<h", sample) for sample in samples))
+    return output.getvalue()
+
+
+@pytest.fixture(autouse=True)
+def local_ffmpeg(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Use the ffmpeg on PATH when the image's pinned one is not there."""
+    for name in ("FFMPEG", "FFPROBE"):
+        pinned = getattr(ffmpeg, name)
+        found = shutil.which(Path(pinned).name)
+        if not Path(pinned).exists() and found:
+            monkeypatch.setattr(ffmpeg, name, found)
+
+
+def has_libass() -> bool:
+    binary = ffmpeg.FFMPEG if Path(ffmpeg.FFMPEG).exists() else shutil.which("ffmpeg")
+    if binary is None:
+        return False
+    filters = subprocess.run([binary, "-hide_banner", "-filters"], capture_output=True, check=False)
+    return b" ass " in filters.stdout
+
+
+needs_libass = pytest.mark.skipif(not has_libass(), reason="this ffmpeg has no libass")
