@@ -67,7 +67,7 @@ def test_numbered_words_keep_their_lines() -> None:
 def test_the_subtitles_show_the_title_the_line_and_the_next_one() -> None:
     timed = words(("Hello", 2, 2.5, 0), ("{world}", 2.5, 3, 0), ("again", 6, 6.5, 1))
 
-    ass = karaoke.build_ass(timed, "My Song", "neon", "glow")
+    ass = karaoke.build_ass(timed, "My Song", karaoke.Style("neon", "glow", "bars"))
 
     events = [line for line in ass.splitlines() if line.startswith("Dialogue:")]
     assert events[0].endswith("Title,,0,0,0,,My Song")
@@ -75,6 +75,15 @@ def test_the_subtitles_show_the_title_the_line_and_the_next_one() -> None:
     assert "\\bord9" in events[1]
     assert events[2].endswith("again")
     assert len(events) == 4
+
+
+def test_the_next_line_can_stay_hidden() -> None:
+    timed = words(("Hello", 2, 2.5, 0), ("again", 6, 6.5, 1))
+
+    ass = karaoke.build_ass(timed, "", karaoke.Style("neon", "sweep", "bars", upcoming=False))
+
+    events = [line for line in ass.splitlines() if line.startswith("Dialogue:")]
+    assert [",Current," in event for event in events] == [True, True]
 
 
 def test_text_cannot_start_a_new_subtitle_line() -> None:

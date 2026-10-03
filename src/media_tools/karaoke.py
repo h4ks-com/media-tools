@@ -17,6 +17,9 @@ type Background = Literal["bars", "waves", "spectrum"]
 
 FONTS_DIR = os.environ.get("FONTS_DIR", "/opt/tools/fonts")
 WIDTH, HEIGHT, FPS = 1280, 720, 30
+# Over still pictures only the words move, and the highlight sweep reads smoothly at half the
+# visualizer's frame rate for half the encoding work.
+SLIDESHOW_FPS = 15
 FONT = "Lilita One"
 LINE_GAP_SECONDS = 1.2
 MAX_WORDS_PER_LINE = 8
@@ -76,9 +79,12 @@ class Word:
 
 @dataclass(frozen=True)
 class Style:
+    """How the words look; `upcoming` also shows the next line under the one being sung."""
+
     look: LookName
     highlight: Highlight
     background: Background
+    upcoming: bool = True
 
 
 @dataclass(frozen=True)
@@ -260,8 +266,8 @@ def ass_header(look: Look) -> str:
     return "\n".join(lines) + "\n"
 
 
-def build_ass(words: list[Word], title: str, look_name: LookName, highlight: Highlight) -> str:
-    look = LOOKS[look_name]
+def build_ass(words: list[Word], title: str, style: Style) -> str:
+    look, highlight = LOOKS[style.look], style.highlight
     words = [word for word in words if word.text.strip()]
     grouped = group_by_line(words) if all(word.line is not None for word in words) else None
     lines = [trim_lead_in(line) for line in grouped or group_by_pauses(words)]
@@ -280,7 +286,7 @@ def build_ass(words: list[Word], title: str, look_name: LookName, highlight: Hig
             f"Dialogue: 2,{span},Current,,0,0,0,,{{\\pos({WIDTH // 2},{HEIGHT // 2 + 40}){blur}}}"
             f"{karaoke_line(line, shown_from, highlight, look)}"
         )
-        if upcoming:
+        if upcoming and style.upcoming:
             text = " ".join(ass_text(word.text) for word in upcoming)
             events.append(
                 f"Dialogue: 2,{span},Next,,0,0,0,,{{\\pos({WIDTH // 2},{HEIGHT // 2 + 130})}}{text}"
@@ -313,26 +319,23 @@ def slideshow_inputs(paths: list[Path], starts: list[float], duration: float) ->
     for index, path in enumerate(paths):
         until = starts[index + 1] if index + 1 < len(starts) else duration
         seconds = max(1.0, until - (0 if index == 0 else starts[index]))
-        inputs += [*ffmpeg.PICTURE_GUARD, "-loop", "1", "-framerate", str(FPS)]
+        inputs += [*ffmpeg.PICTURE_GUARD, "-loop", "1", "-framerate", str(SLIDESHOW_FPS)]
         inputs += ["-t", f"{seconds:.3f}", "-i", str(path)]
     return inputs
 
 
 def slideshow_graph(first_input: int, count: int, ass_path: Path) -> str:
-    """Show the pictures in turn, fading in, darkened low so the lines read over any image."""
+    """Show the pictures in turn, each fading in, with the words over them."""
     chains = [
         f"[{first_input + index}:v]scale={WIDTH}:{HEIGHT}:force_original_aspect_ratio=increase,"
-        f"crop={WIDTH}:{HEIGHT},setsar=1,fps={FPS},format=yuv420p,"
+        f"crop={WIDTH}:{HEIGHT},setsar=1,fps={SLIDESHOW_FPS},format=yuv420p,"
         f"fade=t=in:st=0:d={PICTURE_FADE_SECONDS}[picture{index}]"
         for index in range(count)
     ]
     labels = "".join(f"[picture{index}]" for index in range(count))
-    band = (
-        f"drawbox=x=0:y={HEIGHT * 11 // 20}:w={WIDTH}:h={HEIGHT * 9 // 20}:color=black@0.45:t=fill"
-    )
     return (
         ";".join(chains)
-        + f";{labels}concat=n={count}:v=1:a=0,{band},"
+        + f";{labels}concat=n={count}:v=1:a=0,"
         + f"ass={ass_path}:fontsdir={FONTS_DIR},format=yuv420p[video]"
     )
 
@@ -347,7 +350,7 @@ def render(song: Song, style: Style, pictures: list[Picture], timeout: float) ->
         folder = Path(workdir)
         (folder / "audio").write_bytes(song.audio)
         ass_path, target = folder / "lyrics.ass", folder / "karaoke.mp4"
-        lyrics = build_ass(words, song.title, style.look, style.highlight)
+        lyrics = build_ass(words, song.title, style)
         ass_path.write_text(lyrics, encoding="utf-8")
         inputs = [*ffmpeg.AUDIO_GUARD, "-i", str(folder / "audio")]
         if vocals:
