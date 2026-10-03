@@ -81,7 +81,8 @@ def mix_bed(voice: bytes, bed: bytes, timeout: float) -> bytes:
 
 
 def metadata_value(text: str) -> str:
-    return re.sub(r"([=;#\\\n])", r"\\\1", text)
+    """Escape a tag for ffmpeg's metadata file, kept on one line."""
+    return re.sub(r"([=;#\\])", r"\\\1", re.sub(r"\s+", " ", text))
 
 
 def ffmetadata(tags: BookTags, chapters: list[Chapter], total_seconds: float) -> str:

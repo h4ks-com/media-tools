@@ -4,7 +4,9 @@ Each POST takes raw file bytes as its body, since n8n sends one binary body per 
 files go back to back with their byte lengths in the `lengths` query.
 """
 
+import itertools
 import json
+import math
 import os
 import threading
 from collections.abc import Callable
@@ -40,7 +42,7 @@ MAX_MOTION_BYTES = 5 * 1024 * 1024
 MAX_FRAMES = 16
 MAX_CLIPS = 8
 MAX_LIBRARY_CLIPS = 24
-MAX_AUDIO_BYTES = 300 * 1024 * 1024
+MAX_MEDIA_BYTES = 300 * 1024 * 1024
 MAX_WORDS = 20_000
 MAX_KARAOKE_PICTURES = 24
 MAX_CHAPTERS = 100
@@ -306,7 +308,7 @@ async def convert_audio(
     ac: Annotated[int | None, Query(ge=1, le=8)] = None,
 ) -> Response:
     with heavy_turn():
-        track = await read_body(request, MAX_AUDIO_BYTES)
+        track = await read_body(request, MAX_MEDIA_BYTES)
         data = await run_media(lambda: audio.convert(track, format, ar, ac, TIMEOUT_SECONDS))
     return named_file(data, f"audio.{format}")
 
@@ -315,7 +317,7 @@ async def convert_audio(
 async def mix_bed(request: Request, lengths: str) -> Response:
     """Take the spoken track then the music, and lay the voices over the music."""
     with heavy_turn():
-        body = await read_body(request, 2 * MAX_AUDIO_BYTES)
+        body = await read_body(request, MAX_MEDIA_BYTES)
         voice, bed = split_body(body, lengths, range(2, 3))
         data = await run_media(lambda: audio.mix_bed(voice, bed, TIMEOUT_SECONDS))
     return named_file(data, "mixed.wav")
@@ -326,9 +328,13 @@ def picture_starts(starts: str) -> list[float]:
         values = [float(value) for value in starts.split(",") if value]
     except ValueError as error:
         raise HTTPException(400, "picture_starts is a comma separated list of seconds") from error
-    if len(values) > MAX_KARAOKE_PICTURES or values != sorted(values) or any(v < 0 for v in values):
+    gaps = [later - earlier for earlier, later in itertools.pairwise(values)]
+    finite = all(math.isfinite(value) and value >= 0 for value in values)
+    if len(values) > MAX_KARAOKE_PICTURES or not finite or any(gap < 1 for gap in gaps):
         raise HTTPException(
-            400, f"give at most {MAX_KARAOKE_PICTURES} ascending picture_starts in seconds"
+            400,
+            f"give at most {MAX_KARAOKE_PICTURES} picture_starts in seconds, each at least 1 s "
+            "after the one before",
         )
     return values
 
@@ -357,9 +363,7 @@ async def render_karaoke(request: Request, options: Annotated[KaraokeOptions, Qu
     stems = 1 if options.vocals_cut > 0 else 0
     style = karaoke.Style(options.look, options.highlight, options.background)
     with heavy_turn():
-        body = await read_body(
-            request, (2 + stems) * MAX_AUDIO_BYTES + len(seconds) * MAX_PICTURE_BYTES
-        )
+        body = await read_body(request, MAX_MEDIA_BYTES)
         count = 2 + stems + len(seconds)
         parts = split_body(body, options.lengths, range(count, count + 1))
         vocals = karaoke.Vocals(parts[2], options.vocals_cut) if stems else None
@@ -399,8 +403,8 @@ def parsed_chapters(data: bytes) -> list[audio.Chapter]:
         ]
     except (ValueError, KeyError, TypeError) as error:
         raise HTTPException(400, f"chapters: {error}") from error
-    if any(chapter.start < 0 for chapter in chapters):
-        raise HTTPException(400, "chapters start at 0 seconds or later")
+    if not all(math.isfinite(chapter.start) and chapter.start >= 0 for chapter in chapters):
+        raise HTTPException(400, "chapters start at a finite 0 seconds or later")
     return sorted(chapters, key=lambda chapter: chapter.start)
 
 
@@ -413,7 +417,7 @@ async def package_mp3(
 ) -> Response:
     """Take the audio, the chapters JSON and optionally the cover picture."""
     with heavy_turn():
-        body = await read_body(request, MAX_AUDIO_BYTES + MAX_PICTURE_BYTES + MAX_PICTURE_BYTES)
+        body = await read_body(request, MAX_MEDIA_BYTES)
         track, chapter_list, *art = split_body(body, lengths, range(2, 4))
         chapters = parsed_chapters(chapter_list)
         tags = audio.BookTags(title, artist)

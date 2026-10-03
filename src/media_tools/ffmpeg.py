@@ -49,7 +49,7 @@ def probe(path: Path, timeout: float) -> AudioFacts:
 
     :raises FfmpegError: when ffprobe cannot read it.
     """
-    command = [FFPROBE, "-v", "error", *AUDIO_GUARD, "-show_entries"]
+    command = [FFPROBE, "-v", "error", *AUDIO_GUARD, "-select_streams", "a:0", "-show_entries"]
     command += ["format=duration:stream=sample_rate", "-of", "json", str(path)]
     try:
         result = subprocess.run(command, capture_output=True, timeout=timeout, check=False)  # nosec B603

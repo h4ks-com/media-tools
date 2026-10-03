@@ -1,6 +1,8 @@
 """Karaoke videos: words lighting up as they are sung, over an audio visualizer or pictures."""
 
+import math
 import os
+import re
 import tempfile
 from dataclasses import dataclass
 from dataclasses import replace
@@ -115,10 +117,12 @@ def parse_words(raw: object, limit: int) -> list[Word]:
         if not isinstance(item, dict):
             raise ValueError("every word is an object with text, start and end")
         start, end, line = float(item["start"]), float(item["end"]), item.get("line")
-        if not 0 <= start <= end:
-            raise ValueError("every word needs 0 <= start <= end")
+        if not (math.isfinite(end) and 0 <= start <= end):
+            raise ValueError("every word needs finite 0 <= start <= end")
+        if line is not None and not (isinstance(line, int) and line >= 0):
+            raise ValueError("a word's line is a whole number from 0")
         text = str(item["text"])[:MAX_WORD_CHARS]
-        words.append(Word(text, start, end, None if line is None else int(line)))
+        words.append(Word(text, start, end, line))
     return sorted(words, key=lambda word: word.start)
 
 
@@ -149,7 +153,8 @@ def timestamp(seconds: float) -> str:
 
 
 def ass_text(text: str) -> str:
-    return text.replace("\\", "").replace("{", "(").replace("}", ")").replace("\n", " ")
+    """Keep text on one ASS line, since libass breaks lines at a carriage return too."""
+    return re.sub(r"\s+", " ", text.replace("\\", "").replace("{", "(").replace("}", ")"))
 
 
 def group_by_pauses(words: list[Word]) -> list[list[Word]]:
@@ -353,7 +358,7 @@ def render(song: Song, style: Style, pictures: list[Picture], timeout: float) ->
             paths = [folder / f"picture-{index}" for index in range(len(pictures))]
             for path, picture in zip(paths, pictures, strict=True):
                 path.write_bytes(picture.data)
-            duration = max(word.end for word in words) + LINGER_SECONDS
+            duration = ffmpeg.probe(folder / "audio", timeout).seconds
             starts = [picture.start for picture in pictures]
             inputs += slideshow_inputs(paths, starts, duration)
             graph = track + "[heard]anullsink;"

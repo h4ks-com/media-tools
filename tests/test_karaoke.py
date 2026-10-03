@@ -1,4 +1,5 @@
 import json
+import math
 import subprocess
 from pathlib import Path
 
@@ -36,6 +37,8 @@ def test_words_are_read_sorted_and_trimmed() -> None:
         ([{}, {}, {}], "list of 1 to 2"),
         (["word"], "object"),
         ([{"text": "a", "start": 2, "end": 1}], "start <= end"),
+        ([{"text": "a", "start": 0, "end": math.inf}], "finite"),
+        ([{"text": "a", "start": 0, "end": 1, "line": 1.5}], "whole number"),
     ],
 )
 def test_bad_words_are_refused(raw: object, message: str) -> None:
@@ -72,6 +75,10 @@ def test_the_subtitles_show_the_title_the_line_and_the_next_one() -> None:
     assert "\\bord9" in events[1]
     assert events[2].endswith("again")
     assert len(events) == 4
+
+
+def test_text_cannot_start_a_new_subtitle_line() -> None:
+    assert karaoke.ass_text("a\rDialogue: {x}\nb") == "a Dialogue: (x) b"
 
 
 def test_the_glow_is_only_for_the_glow_highlight() -> None:

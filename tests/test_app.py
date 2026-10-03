@@ -467,7 +467,13 @@ def test_the_mp3_takes_audio_chapters_and_a_cover() -> None:
 
 @pytest.mark.parametrize(
     "chapters",
-    [b"not json", b'{"title": "One"}', b'[{"title": "One"}]', b'[{"title": "One", "start": -1}]'],
+    [
+        b"not json",
+        b'{"title": "One"}',
+        b'[{"title": "One"}]',
+        b'[{"title": "One", "start": -1}]',
+        b'[{"title": "One", "start": Infinity}]',
+    ],
 )
 def test_bad_chapters_are_a_400(chapters: bytes) -> None:
     lengths, body = joined(tone(1.0), chapters)
@@ -495,6 +501,8 @@ def test_a_cover_of_no_picture_is_a_400() -> None:
     [
         ("picture_starts=5,1", 3),
         ("picture_starts=a", 3),
+        ("picture_starts=0,0.5", 3),
+        ("picture_starts=0,inf", 3),
         ("vocals_cut=0.5", 2),
         ("", 3),
     ],

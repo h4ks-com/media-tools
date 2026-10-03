@@ -70,6 +70,10 @@ def test_metadata_escapes_tags_and_closes_the_last_chapter_at_the_end() -> None:
     ]
 
 
+def test_metadata_values_stay_on_one_line() -> None:
+    assert audio.metadata_value("one\r[CHAPTER]\ntwo") == "one [CHAPTER] two"
+
+
 def test_the_mp3_carries_chapters_and_cover(tmp_path: Path) -> None:
     chapters = [audio.Chapter("Start", 0), audio.Chapter("Middle", 1.0)]
 
