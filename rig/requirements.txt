@@ -2128,9 +2128,9 @@ pygments==2.21.0 \
     # via
     #   ipython
     #   ipython-pygments-lexers
-pyopengl==3.1.7 \
-    --hash=sha256:a6ab19cf290df6101aaf7470843a9c46207789855746399d0af92521a0a92b7a \
-    --hash=sha256:eef31a3888e6984fd4d8e6c9961b184c9813ca82604d37fe3da80eb000a76c86
+PyOpenGL==3.1.10 \
+    --hash=sha256:794a943daced39300879e4e47bd94525280685f42dbb5a998d336cfff151d74f \
+    --hash=sha256:c4a02d6866b54eb119c8e9b3fb04fa835a95ab802dd96607ab4cdb0012df8335
     # via
     #   --override rig/overrides.txt
     #   -r rig/requirements.in
