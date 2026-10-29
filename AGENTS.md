@@ -12,7 +12,7 @@ media-tools is an internal HTTP service the h4ks n8n workflows call inside the c
 - `mesh.py`: gltfpack simplification and opaque materials.
 - `retarget.py`: moves skeleton animations (Kimodo SOMA or a humanoid rig) onto a rigged humanoid GLB as named clips.
 - `glb.py`: reading and writing binary glTF.
-- `audio.py`: audio conversion, voices over a ducking music bed, and audiobook MP3s with chapters and cover art.
+- `audio.py`: audio conversion, clips joined into one track at their starts, voices over a ducking music bed, and audiobook MP3s with chapters and cover art.
 - `karaoke.py`: karaoke videos, the sung words lit over an audio visualizer or a slideshow of pictures.
 - `cover.py`: a title set in the karaoke font on cover art, since picture models misspell words.
 - `ffmpeg.py`: runs the pinned ffmpeg and ffprobe with input guards that keep them on the uploaded files.

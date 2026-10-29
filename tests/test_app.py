@@ -482,6 +482,57 @@ def test_beds_too_close_together_are_a_400() -> None:
     assert post(f"/mix-bed?lengths={lengths}&bed_starts=0,1", body)[0] == 400
 
 
+def test_mix_bed_answers_in_the_format_asked() -> None:
+    lengths, body = joined(tone(1.0), tone(1.0))
+
+    response = client.post(f"/mix-bed?lengths={lengths}&format=mp3", content=body)
+
+    assert response.status_code == 200
+    assert response.headers["content-disposition"] == 'inline; filename="mixed.mp3"'
+
+
+def placements(*starts: float) -> bytes:
+    return json.dumps([{"start": start, "gain": 1} for start in starts]).encode()
+
+
+def test_join_takes_the_placements_then_the_clips() -> None:
+    lengths, body = joined(placements(0, 1.5), tone(1.0), tone(1.0))
+
+    status, flac = post(f"/join?lengths={lengths}", body)
+
+    assert (status, flac[:4]) == (200, b"fLaC")
+
+
+def test_join_needs_one_placement_per_clip() -> None:
+    lengths, body = joined(placements(0, 1), tone(1.0))
+
+    assert post(f"/join?lengths={lengths}", body)[0] == 400
+
+
+@pytest.mark.parametrize(
+    "placement_list",
+    [
+        b"not json",
+        b"{}",
+        b"[]",
+        json.dumps([{"start": -1, "gain": 1}]).encode(),
+        json.dumps([{"start": 0, "gain": 9}]).encode(),
+        json.dumps([{"start": 0}]).encode(),
+        b'[{"start": NaN, "gain": 1}]',
+    ],
+)
+def test_join_refuses_bad_placements(placement_list: bytes) -> None:
+    lengths, body = joined(placement_list, tone(1.0))
+
+    assert post(f"/join?lengths={lengths}", body)[0] == 400
+
+
+def test_joining_no_audio_is_a_422() -> None:
+    lengths, body = joined(placements(0), b"not audio")
+
+    assert post(f"/join?lengths={lengths}", body)[0] == 422
+
+
 def test_the_mp3_takes_audio_chapters_and_a_cover() -> None:
     chapters = json.dumps([{"title": "One", "start": 0}]).encode()
     lengths, body = joined(tone(1.0), chapters, png((32, 32)))

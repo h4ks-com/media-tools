@@ -1,10 +1,12 @@
-"""Convert audio, lay voices over a music bed and package audiobooks as MP3s with chapters."""
+"""Convert and join audio, lay voices over a music bed and package audiobooks as MP3s."""
 
 import re
 import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
+
+import numpy
 
 from media_tools import ffmpeg
 
@@ -18,6 +20,13 @@ CODECS: dict[AudioFormat, list[str]] = {
 BED_PADDING_SECONDS = 8
 BED_CROSSFADE_SECONDS = 3
 COVER_ART_SIZE = 600
+JOIN_RATE = 44100
+
+
+@dataclass(frozen=True)
+class Placement:
+    start: float
+    gain: float
 
 
 @dataclass(frozen=True)
@@ -101,18 +110,57 @@ def bed_mix_graph(seconds: float, rate: int, bed_volume: float, bed_starts: list
     return ";".join(graph)
 
 
+def join(
+    clips: list[bytes], placements: list[Placement], max_seconds: float, timeout: float
+) -> bytes:
+    """Lay each clip into one mono track at its start and gain, as FLAC at JOIN_RATE.
+
+    Clips may overlap, and overlapping clips add up.
+
+    :raises FfmpegError: when ffmpeg cannot read a clip.
+    :raises ValueError: when the track would run longer than max_seconds.
+    """
+    with tempfile.TemporaryDirectory() as workdir:
+        source, raw = Path(workdir) / "clip", Path(workdir) / "samples.f32"
+        decoded = []
+        for clip in clips:
+            source.write_bytes(clip)
+            mono = ["-vn", "-ac", "1", "-ar", str(JOIN_RATE), "-f", "f32le"]
+            ffmpeg.run([*ffmpeg.AUDIO_GUARD, "-i", str(source), *mono, "-y", str(raw)], timeout)
+            decoded.append(numpy.fromfile(raw, dtype=numpy.float32))
+        offsets = [round(placement.start * JOIN_RATE) for placement in placements]
+        frames = max(
+            offset + len(samples) for offset, samples in zip(offsets, decoded, strict=True)
+        )
+        if frames > max_seconds * JOIN_RATE:
+            raise ValueError(f"the joined track would run longer than {max_seconds} s")
+        track = numpy.zeros(frames, dtype=numpy.float32)
+        for offset, samples, placement in zip(offsets, decoded, placements, strict=True):
+            track[offset : offset + len(samples)] += samples * placement.gain
+        track.tofile(raw)
+        target = Path(workdir) / "joined.flac"
+        track_input = ["-f", "f32le", "-ar", str(JOIN_RATE), "-ac", "1", "-i", str(raw)]
+        ffmpeg.run([*track_input, "-c:a", "flac", "-y", str(target)], timeout)
+        return target.read_bytes()
+
+
 def mix_bed(
-    voice: bytes, beds: list[bytes], bed_starts: list[float], bed_volume: float, timeout: float
+    voice: bytes,
+    beds: list[bytes],
+    bed_starts: list[float],
+    bed_volume: float,
+    audio_format: AudioFormat,
+    timeout: float,
 ) -> bytes:
     """Lay the voices over the beds at that volume, each bed from its start in the voices' seconds.
 
-    Answers with a stereo WAV at the voices' rate.
+    Answers with a stereo track at the voices' rate.
 
     :raises FfmpegError: when ffmpeg cannot read the tracks.
     :raises ValueError: when the beds start too close together or after the voices end.
     """
     with tempfile.TemporaryDirectory() as workdir:
-        voice_path, target = Path(workdir) / "voice", Path(workdir) / "mixed.wav"
+        voice_path, target = Path(workdir) / "voice", Path(workdir) / f"mixed.{audio_format}"
         voice_path.write_bytes(voice)
         facts = ffmpeg.probe(voice_path, timeout)
         graph = bed_mix_graph(facts.seconds, facts.sample_rate, bed_volume, bed_starts)
@@ -122,7 +170,7 @@ def mix_bed(
             bed_path.write_bytes(bed)
             arguments += [*ffmpeg.AUDIO_GUARD, "-i", str(bed_path)]
         arguments += ["-filter_complex", graph, "-map", "[out]"]
-        ffmpeg.run([*arguments, "-c:a", "pcm_s16le", "-y", str(target)], timeout)
+        ffmpeg.run([*arguments, *CODECS[audio_format], "-y", str(target)], timeout)
         return target.read_bytes()
 
 

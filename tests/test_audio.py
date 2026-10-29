@@ -2,6 +2,7 @@ import json
 import subprocess
 from pathlib import Path
 
+import numpy
 import pytest
 
 from conftest import png
@@ -40,7 +41,7 @@ def test_convert_refuses_what_is_no_audio() -> None:
 
 def test_the_bed_plays_before_and_after_the_voices(tmp_path: Path) -> None:
     path = tmp_path / "mixed.wav"
-    path.write_bytes(audio.mix_bed(tone(2.0), [tone(3.0, rate=44100)], [0], 0.3, 60))
+    path.write_bytes(audio.mix_bed(tone(2.0), [tone(3.0, rate=44100)], [0], 0.3, "wav", 60))
 
     facts = ffmpeg.probe(path, 60)
 
@@ -50,11 +51,60 @@ def test_the_bed_plays_before_and_after_the_voices(tmp_path: Path) -> None:
 
 def test_later_beds_cross_fade_in_and_keep_the_length(tmp_path: Path) -> None:
     path = tmp_path / "mixed.wav"
-    path.write_bytes(audio.mix_bed(tone(20.0), [tone(3.0), tone(2.0)], [0, 10], 0.3, 60))
+    path.write_bytes(audio.mix_bed(tone(20.0), [tone(3.0), tone(2.0)], [0, 10], 0.3, "wav", 60))
 
     assert ffmpeg.probe(path, 60).seconds == pytest.approx(
         20.0 + 2 * audio.BED_PADDING_SECONDS, abs=0.1
     )
+
+
+def test_the_mix_comes_as_mp3_when_asked(tmp_path: Path) -> None:
+    mp3 = audio.mix_bed(tone(2.0), [tone(3.0)], [0], 0.3, "mp3", 60)
+
+    assert probed(mp3, tmp_path, "streams", "stream=codec_name,channels") == [
+        {"codec_name": "mp3", "channels": 2}
+    ]
+
+
+def joined_samples(flac: bytes, tmp_path: Path) -> numpy.ndarray:
+    path, raw = tmp_path / "joined.flac", tmp_path / "joined.f32"
+    path.write_bytes(flac)
+    subprocess.run(
+        [ffmpeg.FFMPEG, "-v", "error", "-i", str(path), "-f", "f32le", "-y", str(raw)], check=True
+    )
+    return numpy.fromfile(raw, dtype=numpy.float32)
+
+
+def test_join_places_each_clip_at_its_start_at_one_rate(tmp_path: Path) -> None:
+    clips = [tone(1.0), tone(0.5, rate=44100)]
+    placements = [audio.Placement(0, 1), audio.Placement(2.0, 1)]
+
+    flac = audio.join(clips, placements, 60, 60)
+
+    streams = probed(flac, tmp_path, "streams", "stream=codec_name,sample_rate,channels")
+    assert streams == [{"codec_name": "flac", "sample_rate": "44100", "channels": 1}]
+    samples = joined_samples(flac, tmp_path)
+    assert len(samples) == pytest.approx(2.5 * audio.JOIN_RATE, abs=50)
+    assert numpy.abs(samples[round(1.2 * audio.JOIN_RATE) : 2 * audio.JOIN_RATE]).max() == 0
+
+
+def test_overlapping_clips_add_up_with_their_gains(tmp_path: Path) -> None:
+    placements = [audio.Placement(0, 1), audio.Placement(0, 0.5)]
+
+    alone = joined_samples(audio.join([tone(1.0)], placements[:1], 60, 60), tmp_path)
+    both = joined_samples(audio.join([tone(1.0), tone(1.0)], placements, 60, 60), tmp_path)
+
+    assert numpy.abs(both).max() == pytest.approx(1.5 * numpy.abs(alone).max(), rel=0.01)
+
+
+def test_join_refuses_a_track_longer_than_the_limit() -> None:
+    with pytest.raises(ValueError, match="longer than"):
+        audio.join([tone(1.0)], [audio.Placement(5, 1)], 3, 60)
+
+
+def test_join_refuses_what_is_no_audio() -> None:
+    with pytest.raises(FfmpegError):
+        audio.join([b"not audio"], [audio.Placement(0, 1)], 60, 60)
 
 
 def test_each_bed_plays_until_the_next_starts_with_the_fades_counted() -> None:

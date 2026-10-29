@@ -47,6 +47,9 @@ MAX_WORDS = 20_000
 MAX_KARAOKE_PICTURES = 24
 MAX_CHAPTERS = 100
 MAX_BEDS = 24
+MAX_JOIN_CLIPS = 1000
+MAX_JOIN_SECONDS = 4 * 3600
+MAX_JOIN_GAIN = 4
 MAX_TEXT_CHARS = 120
 GLTFPACK = os.environ.get("GLTFPACK", "/opt/tools/gltfpack")
 COVER_FONT = Path(karaoke.FONTS_DIR) / "LilitaOne-Regular.ttf"
@@ -335,6 +338,7 @@ async def mix_bed(
     lengths: str,
     bed_volume: Annotated[float, Query(gt=0, le=1)] = 0.3,
     bed_starts: str = "0",
+    format: audio.AudioFormat = "wav",
 ) -> Response:
     """Take the spoken track then one music bed per start, and lay the voices over the music."""
     starts = parsed_bed_starts(bed_starts)
@@ -343,11 +347,48 @@ async def mix_bed(
         voice, *beds = split_body(body, lengths, range(len(starts) + 1, len(starts) + 2))
         try:
             data = await run_media(
-                lambda: audio.mix_bed(voice, beds, starts, bed_volume, TIMEOUT_SECONDS)
+                lambda: audio.mix_bed(voice, beds, starts, bed_volume, format, TIMEOUT_SECONDS)
             )
         except ValueError as error:
             raise HTTPException(400, str(error)) from error
-    return named_file(data, "mixed.wav")
+    return named_file(data, f"mixed.{format}")
+
+
+def parsed_placements(data: bytes) -> list[audio.Placement]:
+    try:
+        raw = json.loads(data)
+        if not isinstance(raw, list) or not 0 < len(raw) <= MAX_JOIN_CLIPS:
+            raise ValueError(f"send a list of 1 to {MAX_JOIN_CLIPS} placements")
+        placements = [audio.Placement(float(item["start"]), float(item["gain"])) for item in raw]
+    except (ValueError, KeyError, TypeError) as error:
+        raise HTTPException(400, f"placements: {error}") from error
+    if not all(
+        0 <= placement.start <= MAX_JOIN_SECONDS and 0 <= placement.gain <= MAX_JOIN_GAIN
+        for placement in placements
+    ):
+        raise HTTPException(
+            400,
+            f"place each clip at 0 to {MAX_JOIN_SECONDS} s with a gain of 0 to {MAX_JOIN_GAIN}",
+        )
+    return placements
+
+
+@app.post("/join")
+async def join_clips(request: Request, lengths: str) -> Response:
+    """Take the placements JSON, then one clip per placement, and lay them into one track."""
+    with heavy_turn():
+        body = await read_body(request, MAX_MEDIA_BYTES)
+        placement_list, *clips = split_body(body, lengths, range(2, MAX_JOIN_CLIPS + 2))
+        placements = parsed_placements(placement_list)
+        if len(placements) != len(clips):
+            raise HTTPException(400, "send one placement per clip")
+        try:
+            data = await run_media(
+                lambda: audio.join(clips, placements, MAX_JOIN_SECONDS, TIMEOUT_SECONDS)
+            )
+        except ValueError as error:
+            raise HTTPException(400, str(error)) from error
+    return named_file(data, "joined.flac")
 
 
 def picture_starts(starts: str) -> list[float]:
