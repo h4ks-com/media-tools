@@ -374,7 +374,9 @@ def parsed_placements(data: bytes) -> list[audio.Placement]:
 
 
 @app.post("/join")
-async def join_clips(request: Request, lengths: str) -> Response:
+async def join_clips(
+    request: Request, lengths: str, format: audio.AudioFormat = "flac"
+) -> Response:
     """Take the placements JSON, then one clip per placement, and lay them into one track."""
     with heavy_turn():
         body = await read_body(request, MAX_MEDIA_BYTES)
@@ -384,11 +386,11 @@ async def join_clips(request: Request, lengths: str) -> Response:
             raise HTTPException(400, "send one placement per clip")
         try:
             data = await run_media(
-                lambda: audio.join(clips, placements, MAX_JOIN_SECONDS, TIMEOUT_SECONDS)
+                lambda: audio.join(clips, placements, format, MAX_JOIN_SECONDS, TIMEOUT_SECONDS)
             )
         except ValueError as error:
             raise HTTPException(400, str(error)) from error
-    return named_file(data, "joined.flac")
+    return named_file(data, f"joined.{format}")
 
 
 def picture_starts(starts: str) -> list[float]:

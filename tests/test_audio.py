@@ -79,7 +79,7 @@ def test_join_places_each_clip_at_its_start_at_one_rate(tmp_path: Path) -> None:
     clips = [tone(1.0), tone(0.5, rate=44100)]
     placements = [audio.Placement(0, 1), audio.Placement(2.0, 1)]
 
-    flac = audio.join(clips, placements, 60, 60)
+    flac = audio.join(clips, placements, "flac", 60, 60)
 
     streams = probed(flac, tmp_path, "streams", "stream=codec_name,sample_rate,channels")
     assert streams == [{"codec_name": "flac", "sample_rate": "44100", "channels": 1}]
@@ -91,20 +91,28 @@ def test_join_places_each_clip_at_its_start_at_one_rate(tmp_path: Path) -> None:
 def test_overlapping_clips_add_up_with_their_gains(tmp_path: Path) -> None:
     placements = [audio.Placement(0, 1), audio.Placement(0, 0.5)]
 
-    alone = joined_samples(audio.join([tone(1.0)], placements[:1], 60, 60), tmp_path)
-    both = joined_samples(audio.join([tone(1.0), tone(1.0)], placements, 60, 60), tmp_path)
+    alone = joined_samples(audio.join([tone(1.0)], placements[:1], "flac", 60, 60), tmp_path)
+    both = joined_samples(audio.join([tone(1.0), tone(1.0)], placements, "flac", 60, 60), tmp_path)
 
     assert numpy.abs(both).max() == pytest.approx(1.5 * numpy.abs(alone).max(), rel=0.01)
 
 
+def test_the_joined_track_comes_as_mp3_when_asked(tmp_path: Path) -> None:
+    mp3 = audio.join([tone(1.0)], [audio.Placement(0, 1)], "mp3", 60, 60)
+
+    assert probed(mp3, tmp_path, "streams", "stream=codec_name,channels") == [
+        {"codec_name": "mp3", "channels": 1}
+    ]
+
+
 def test_join_refuses_a_track_longer_than_the_limit() -> None:
     with pytest.raises(ValueError, match="longer than"):
-        audio.join([tone(1.0)], [audio.Placement(5, 1)], 3, 60)
+        audio.join([tone(1.0)], [audio.Placement(5, 1)], "flac", 3, 60)
 
 
 def test_join_refuses_what_is_no_audio() -> None:
     with pytest.raises(FfmpegError):
-        audio.join([b"not audio"], [audio.Placement(0, 1)], 60, 60)
+        audio.join([b"not audio"], [audio.Placement(0, 1)], "flac", 60, 60)
 
 
 def test_each_bed_plays_until_the_next_starts_with_the_fades_counted() -> None:

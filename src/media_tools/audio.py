@@ -111,9 +111,13 @@ def bed_mix_graph(seconds: float, rate: int, bed_volume: float, bed_starts: list
 
 
 def join(
-    clips: list[bytes], placements: list[Placement], max_seconds: float, timeout: float
+    clips: list[bytes],
+    placements: list[Placement],
+    audio_format: AudioFormat,
+    max_seconds: float,
+    timeout: float,
 ) -> bytes:
-    """Lay each clip into one mono track at its start and gain, as FLAC at JOIN_RATE.
+    """Lay each clip into one mono track at its start and gain, at JOIN_RATE.
 
     Clips may overlap, and overlapping clips add up.
 
@@ -138,9 +142,9 @@ def join(
         for offset, samples, placement in zip(offsets, decoded, placements, strict=True):
             track[offset : offset + len(samples)] += samples * placement.gain
         track.tofile(raw)
-        target = Path(workdir) / "joined.flac"
+        target = Path(workdir) / f"joined.{audio_format}"
         track_input = ["-f", "f32le", "-ar", str(JOIN_RATE), "-ac", "1", "-i", str(raw)]
-        ffmpeg.run([*track_input, "-c:a", "flac", "-y", str(target)], timeout)
+        ffmpeg.run([*track_input, *CODECS[audio_format], "-y", str(target)], timeout)
         return target.read_bytes()
 
 
