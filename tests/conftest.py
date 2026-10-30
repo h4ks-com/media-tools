@@ -134,3 +134,19 @@ def has_libass() -> bool:
 
 
 needs_libass = pytest.mark.skipif(not has_libass(), reason="this ffmpeg has no libass")
+
+
+def clip(seconds: float, size: str = "64x112", sound: bool = True) -> bytes:
+    """Return an MP4 of a test pattern, with a tone when `sound`, the shape of a generated clip."""
+    binary = ffmpeg.FFMPEG if Path(ffmpeg.FFMPEG).exists() else shutil.which("ffmpeg")
+    assert binary is not None
+    sources = ["-f", "lavfi", "-i", f"testsrc=size={size}:rate=24:duration={seconds}"]
+    if sound:
+        sources += ["-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}"]
+    encoding = ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", "-f", "mp4"]
+    result = subprocess.run(
+        [binary, "-v", "error", *sources, *encoding, "-movflags", "frag_keyframe+empty_moov", "-"],
+        capture_output=True,
+        check=True,
+    )
+    return result.stdout

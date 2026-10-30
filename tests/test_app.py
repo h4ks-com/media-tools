@@ -11,6 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from PIL import Image
 
+from conftest import clip
 from conftest import edit
 from conftest import glb_with_json
 from conftest import needs_libass
@@ -608,3 +609,35 @@ def test_karaoke_renders_over_pictures() -> None:
     status, video = post(f"/karaoke?lengths={lengths}&picture_starts=0&look=ocean", body)
 
     assert (status, video[4:8]) == (200, b"ftyp")
+
+
+def test_cut_joins_the_clips_into_an_mp4() -> None:
+    lengths, body = joined(clip(1.0), clip(1.0))
+
+    response = client.post(f"/cut?lengths={lengths}&width=72&height=128", content=body)
+
+    assert (response.status_code, response.headers["content-type"]) == (200, "video/mp4")
+
+
+def test_cut_takes_the_music_last() -> None:
+    lengths, body = joined(clip(1.0, sound=False), tone(2.0))
+
+    assert post(f"/cut?lengths={lengths}&music=true&width=72&height=128", body)[0] == 200
+
+
+def test_cut_with_music_needs_a_clip_besides_it() -> None:
+    lengths, body = joined(tone(2.0))
+
+    assert post(f"/cut?lengths={lengths}&music=true", body)[0] == 400
+
+
+def test_cut_sizes_are_even() -> None:
+    lengths, body = joined(clip(1.0))
+
+    assert post(f"/cut?lengths={lengths}&width=71", body)[0] == 422
+
+
+def test_cutting_no_video_is_a_422() -> None:
+    lengths, body = joined(b"not a video")
+
+    assert post(f"/cut?lengths={lengths}", body)[0] == 422

@@ -30,6 +30,7 @@ from media_tools import karaoke
 from media_tools import mesh
 from media_tools import pictures
 from media_tools import poses
+from media_tools import video
 from media_tools.cover import cover
 from media_tools.ffmpeg import FfmpegError
 from media_tools.glb import GlbError
@@ -48,6 +49,7 @@ MAX_KARAOKE_PICTURES = 24
 MAX_CHAPTERS = 100
 MAX_BEDS = 24
 MAX_JOIN_CLIPS = 1000
+MAX_CUT_CLIPS = 24
 MAX_JOIN_SECONDS = 4 * 3600
 MAX_JOIN_GAIN = 4
 MAX_TEXT_CHARS = 120
@@ -391,6 +393,24 @@ async def join_clips(
         except ValueError as error:
             raise HTTPException(400, str(error)) from error
     return named_file(data, f"joined.{format}")
+
+
+@app.post("/cut")
+async def cut_video(
+    request: Request,
+    lengths: str,
+    music: bool = False,
+    width: Annotated[int, Query(ge=64, le=1920, multiple_of=2)] = 720,
+    height: Annotated[int, Query(ge=64, le=1920, multiple_of=2)] = 1280,
+) -> Response:
+    """Take the clips back to back, then the music when music is true, and cut one MP4."""
+    extra = 1 if music else 0
+    with heavy_turn():
+        body = await read_body(request, MAX_MEDIA_BYTES)
+        parts = split_body(body, lengths, range(1 + extra, MAX_CUT_CLIPS + extra + 1))
+        clips, track = (parts[:-1], parts[-1]) if music else (parts, None)
+        data = await run_media(lambda: video.cut(clips, track, width, height, TIMEOUT_SECONDS))
+    return named_file(data, "video.mp4")
 
 
 def picture_starts(starts: str) -> list[float]:

@@ -59,3 +59,17 @@ def probe(path: Path, timeout: float) -> AudioFacts:
         )
     except (subprocess.TimeoutExpired, KeyError, IndexError, ValueError) as error:
         raise FfmpegError("could not read the audio") from error
+
+
+def video_seconds(path: Path, guard: list[str], timeout: float) -> float:
+    """Read how long a file's first video stream plays.
+
+    :raises FfmpegError: when ffprobe finds no video stream in it.
+    """
+    command = [FFPROBE, "-v", "error", *guard, "-select_streams", "v:0", "-show_entries"]
+    command += ["stream=duration", "-of", "json", str(path)]
+    try:
+        result = subprocess.run(command, capture_output=True, timeout=timeout, check=False)  # nosec B603
+        return float(json.loads(result.stdout or b"{}")["streams"][0]["duration"])
+    except (subprocess.TimeoutExpired, KeyError, IndexError, ValueError) as error:
+        raise FfmpegError("could not read the video") from error
