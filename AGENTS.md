@@ -14,7 +14,7 @@ media-tools is an internal HTTP service the h4ks n8n workflows call inside the c
 - `glb.py`: reading and writing binary glTF.
 - `audio.py`: audio conversion, clips joined into one track at their starts, voices over a ducking music bed, and audiobook MP3s with chapters and cover art.
 - `karaoke.py`: karaoke videos, the sung words lit over an audio visualizer or a slideshow of pictures.
-- `video.py`: generated clips cut into one MP4 at one size, over music or their own sound.
+- `video.py`: generated clips cut into one MP4 at one size, over music or their own sound, and a clip's last frame.
 - `cover.py`: a title set in the karaoke font on cover art, since picture models misspell words.
 - `ffmpeg.py`: runs the pinned ffmpeg and ffprobe with input guards that keep them on the uploaded files.
 - `library/`: Quaternius's Universal Animation Library (CC0), one skeleton GLB per clip, which `/retarget` adds by the keys `GET /library` lists. `scripts/split_animation_library.py` writes it from the library's glTF.

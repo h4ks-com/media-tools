@@ -43,6 +43,24 @@ def clip_sound(index: int, length: float, sounded: bool) -> str:
     )
 
 
+def last_frame(clip: bytes, timeout: float) -> bytes:
+    """Answer with the clip's final frame as a PNG.
+
+    :raises FfmpegError: when ffmpeg cannot read the clip.
+    """
+    with tempfile.TemporaryDirectory() as workdir:
+        folder = Path(workdir)
+        path = folder / "clip"
+        path.write_bytes(clip)
+        target = folder / "frame.png"
+        # We decode the last second and let -update overwrite the picture, so the final frame stays.
+        reading = ["-sseof", "-1", *VIDEO_GUARD, "-i", str(path)]
+        ffmpeg.run([*reading, "-map", "0:v:0", "-update", "1", "-y", str(target)], timeout)
+        if not target.exists():
+            raise ffmpeg.FfmpegError("the clip has no video frames")
+        return target.read_bytes()
+
+
 def cut(clips: list[bytes], music: bytes | None, width: int, height: int, timeout: float) -> bytes:
     """Join the clips end to end as one MP4 of width x height.
 

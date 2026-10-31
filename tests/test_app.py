@@ -641,3 +641,11 @@ def test_cutting_no_video_is_a_422() -> None:
     lengths, body = joined(b"not a video")
 
     assert post(f"/cut?lengths={lengths}", body)[0] == 422
+
+
+def test_last_frame_answers_with_a_named_png() -> None:
+    response = client.post("/last-frame", content=clip(1.0))
+
+    assert response.status_code == 200
+    assert response.headers["content-disposition"] == 'inline; filename="frame.png"'
+    assert Image.open(io.BytesIO(response.content)).format == "PNG"

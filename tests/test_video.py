@@ -49,3 +49,15 @@ def test_music_shorter_than_the_clips_is_padded_to_their_end(tmp_path: Path) -> 
 def test_a_clip_that_is_no_video_is_refused() -> None:
     with pytest.raises(FfmpegError):
         video.cut([b"not a video"], None, 72, 128, 60)
+
+
+def test_the_last_frame_comes_back_as_a_png_at_the_clip_size(tmp_path: Path) -> None:
+    frame = video.last_frame(clip(1.0, size="72x128"), 60)
+
+    picture = probed(frame, tmp_path, "streams", "stream=codec_name,width,height")[0]
+    assert picture == {"codec_name": "png", "width": 72, "height": 128}
+
+
+def test_a_last_frame_of_no_video_is_refused() -> None:
+    with pytest.raises(FfmpegError):
+        video.last_frame(b"not a video", 60)

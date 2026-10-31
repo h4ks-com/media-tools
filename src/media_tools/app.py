@@ -413,6 +413,15 @@ async def cut_video(
     return named_file(data, "video.mp4")
 
 
+@app.post("/last-frame")
+async def last_frame(request: Request) -> Response:
+    """Take one clip and answer with its final frame as a PNG."""
+    with heavy_turn():
+        clip = await read_body(request, MAX_MEDIA_BYTES)
+        data = await run_media(lambda: video.last_frame(clip, TIMEOUT_SECONDS))
+    return named_file(data, "frame.png")
+
+
 def picture_starts(starts: str) -> list[float]:
     try:
         values = [float(value) for value in starts.split(",") if value]
